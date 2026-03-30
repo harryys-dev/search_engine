@@ -4,15 +4,16 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"log"
+	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"search_engine/internal/engine"
 
-	"github.com/PuerkitoBio/goquery"
+	readability "codeberg.org/readeck/go-readability/v2"
 	"github.com/gocolly/colly/v2"
 )
 
@@ -44,8 +45,8 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		MaxPages:     50,
-		MaxDepth:     2,
+		MaxPages:     5000,
+		MaxDepth:     4,
 		AllowedHosts: []string{},
 		Delay:        500 * time.Millisecond,
 		UserAgent:    "GoSearchEngine/1.0",
@@ -74,37 +75,47 @@ func New(cfg Config, searchEngine *engine.SearchEngine) *Crawler {
 
 	c.collector.Limit(&colly.LimitRule{
 		DomainGlob:  "*",
-		Parallelism: 2,
+		Parallelism: 5,
 		Delay:       cfg.Delay,
+	})
+
+	c.collector.OnXML("//sitemap/loc|//urlset/url/loc", func(e *colly.XMLElement) {
+		url := e.Text
+		if isValidURL(url) && !isMediaURL(url) {
+			c.collector.Visit(url)
+		}
 	})
 
 	c.collector.OnHTML("html", func(e *colly.HTMLElement) {
 		c.mu.Lock()
-		defer c.mu.Unlock()
-
 		if c.pageCount >= c.maxPages {
+			c.mu.Unlock()
 			return
 		}
+		c.mu.Unlock()
 
-		pageURL := e.Request.URL.String()
+		pageURL := e.Request.URL
 
-		// Проверяем, не проиндексирована ли уже эта страница
-		if c.searchEngine.IsURLIndexed(pageURL) {
+		if c.searchEngine.IsURLIndexed(pageURL.String()) {
 			log.Printf("URL already indexed, skipping: %s", pageURL)
 			return
 		}
 
-		// Фильтрация служебных страниц (Википедия и похожие)
-		if isServicePage(pageURL) {
+		if isServicePage(pageURL.String()) {
 			return
 		}
 
-		title := e.ChildText("title")
-		if title == "" {
-			title = e.ChildText("h1")
+		article, err := readability.FromDocument(e.DOM.Get(0).Parent, pageURL)
+		if err != nil {
+			log.Printf("Readability error for %s: %v", pageURL, err)
+			return
 		}
 
-		content := extractMainContent(e)
+		var textBuf strings.Builder
+		article.RenderText(&textBuf)
+		content := textBuf.String()
+		content = stripBoilerplate(content) // ← сюда
+		content = stripCombining(content)
 		if len(content) < 200 {
 			return
 		}
@@ -112,20 +123,22 @@ func New(cfg Config, searchEngine *engine.SearchEngine) *Crawler {
 		hash := calculateHash(content)
 
 		page := Page{
-			URL:         pageURL,
-			Title:       cleanTitle(title),
+			URL:         pageURL.String(),
+			Title:       article.Title(),
 			Content:     content,
 			ContentHash: hash,
 		}
 
+		c.mu.Lock()
 		c.pages = append(c.pages, page)
 		c.pageCount++
+		c.mu.Unlock()
 
 		if c.onPage != nil {
 			c.onPage(page)
 		}
 
-		log.Printf("Crawled [%d/%d]: %s", c.pageCount, c.maxPages, title)
+		log.Printf("Crawled [%d/%d]: %s", c.pageCount, c.maxPages, article.Title())
 	})
 
 	c.collector.OnHTML("a[href]", func(e *colly.HTMLElement) {
@@ -159,11 +172,73 @@ func New(cfg Config, searchEngine *engine.SearchEngine) *Crawler {
 	return c
 }
 
+func stripCombining(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if !unicode.Is(unicode.Mn, r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func stripBoilerplate(text string) string {
+	prefixes := []string{
+		"Материал из Википедии",
+		"Материал из Вики",
+		"From Wikipedia",
+		"Jump to navigation",
+		"Перейти к навигации",
+		"Перейти к поиску",
+	}
+
+	cleaned := text
+	for _, prefix := range prefixes {
+		if idx := strings.Index(cleaned, prefix); idx >= 0 && idx < 100 {
+			// Вырезаем до конца строки после префикса
+			end := strings.Index(cleaned[idx:], "\n")
+			if end == -1 {
+				end = strings.Index(cleaned[idx:], ". ")
+				if end == -1 {
+					end = len(prefix)
+				}
+			}
+			cleaned = cleaned[idx+end:]
+			cleaned = strings.TrimSpace(cleaned)
+		}
+	}
+
+	// Убираем пустые строки в начале
+	for strings.HasPrefix(cleaned, "\n") {
+		cleaned = strings.TrimPrefix(cleaned, "\n")
+	}
+	cleaned = strings.TrimSpace(cleaned)
+
+	return cleaned
+}
+
 func (c *Crawler) OnPage(fn func(Page)) {
 	c.onPage = fn
 }
 
 func (c *Crawler) Crawl(seedURLs []string) []Page {
+
+	sitemapURLs := make([]string, 0, len(seedURLs))
+	for _, u := range seedURLs {
+		parsed, _ := url.Parse(u)
+		sitemapURLs = append(sitemapURLs, parsed.Scheme+"://"+parsed.Host+"/sitemap.xml")
+	}
+
+	for _, su := range sitemapURLs {
+		resp, err := http.Get(su)
+		if err == nil {
+			resp.Body.Close()
+			log.Printf("Found sitemap: %s", su)
+			c.collector.Visit(su) // XML callback заберёт все URL
+		}
+	}
+
 	done := make(chan bool)
 
 	go func() {
@@ -235,7 +310,19 @@ func isServicePage(u string) bool {
 		`Special:RecentChanges`,
 		`_(значения)`,
 		`_(значение)`,
+		"мои-комментарии",
+		"добавить-новую",
+		"сообщить-об-ошибке",
+		"шпаргалка",
+		"правообладателям",
+		"/dmca",
+		"/license",
+		"пользовательское-соглашение",
+		"политика-конфиденциальности",
+		"github.com",
+		"opensource.org",
 	}
+
 	for _, p := range servicePatterns {
 		if strings.Contains(decoded, p) {
 			return true
@@ -247,57 +334,6 @@ func isServicePage(u string) bool {
 func calculateHash(text string) string {
 	hash := md5.Sum([]byte(text))
 	return hex.EncodeToString(hash[:])
-}
-
-func extractMainContent(e *colly.HTMLElement) string {
-	// Удаляем весь мусор
-	e.DOM.Find("script, style, nav, header, footer, aside, .sidebar, .menu, .navigation, .ads, .advertisement, .cookie, .popup, table.infobox, .reference, .mw-editsection, .navbox").Remove()
-
-	var sb strings.Builder
-
-	// Ищем текст ТОЛЬКО в параграфах
-	e.DOM.Find("p").Each(func(i int, s *goquery.Selection) {
-		text := strings.TrimSpace(s.Text())
-		if len(text) > 0 {
-			sb.WriteString(text)
-			sb.WriteString(" ")
-		}
-	})
-
-	content := sb.String()
-
-	if len(content) < 200 {
-		content = e.ChildText("body")
-	}
-
-	content = cleanText(content)
-	return content
-}
-
-func cleanText(text string) string {
-	patterns := []string{
-		`\[\s*(править|правка|edit)\s*\|?\s*(код|source)?\s*\]`,
-		`\[\s*\d+\s*\]`,
-		`Материал из Википедии.*?энциклопедии`,
-		`Перейти к навигации`,
-		`Перейти к поиску`,
-	}
-
-	for _, p := range patterns {
-		re := regexp.MustCompile(`(?i)` + p)
-		text = re.ReplaceAllString(text, " ")
-	}
-
-	text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")
-	text = strings.TrimSpace(text)
-
-	return text
-}
-
-func cleanTitle(title string) string {
-	title = strings.TrimSpace(title)
-	title = regexp.MustCompile(`\s*[-|—]\s*.*$`).ReplaceAllString(title, "")
-	return title
 }
 
 func isValidURL(u string) bool {

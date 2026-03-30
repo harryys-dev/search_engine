@@ -150,14 +150,32 @@ func (e *SearchEngine) Search(queryStr string) []models.SearchResult {
 		return []models.SearchResult{}
 	}
 
-	// Создаем MatchQuery и явно указываем анализатор
-	mq := bleve.NewMatchQuery(queryStr)
-	mq.Analyzer = "ru"
-	mq.Fuzziness = 1 // Опционально: разрешаем небольшие опечатки
+	// Убираем стоп-слова из запроса
+	cleanedQuery := filterStopWords(queryStr)
+	if cleanedQuery == "" {
+		cleanedQuery = queryStr // если всё оказались стоп-словами
+	}
 
-	searchRequest := bleve.NewSearchRequest(mq)
-	searchRequest.Size = 40              // Берем больше, чтобы потом отфильтровать дубли
-	searchRequest.Fields = []string{"*"} // Запрашиваем все сохраненные поля
+	mq := bleve.NewMatchQuery(cleanedQuery)
+	mq.Analyzer = "ru"
+	mq.Fuzziness = 1
+
+	// Бустим content — чтобы документы где слово есть в тексте ранжировались выше
+	contentQuery := bleve.NewMatchQuery(cleanedQuery)
+	contentQuery.Analyzer = "ru"
+	contentQuery.SetField("content")
+
+	titleQuery := bleve.NewMatchQuery(cleanedQuery)
+	titleQuery.Analyzer = "ru"
+	titleQuery.SetField("title")
+
+	bq := bleve.NewBooleanQuery()
+	bq.AddShould(contentQuery) // основной вес — совпадение в контенте
+	bq.AddShould(titleQuery)   // доп. вес — совпадение в заголовке
+
+	searchRequest := bleve.NewSearchRequest(bq)
+	searchRequest.Size = 40
+	searchRequest.Fields = []string{"*"}
 	searchRequest.IncludeLocations = true
 
 	searchResult, err := e.index.Search(searchRequest)
@@ -170,9 +188,7 @@ func (e *SearchEngine) Search(queryStr string) []models.SearchResult {
 	seenTitles := make(map[string]bool)
 
 	for _, hit := range searchResult.Hits {
-		// Восстанавливаем документ из полей, сохраненных в Bleve
 		doc := models.Document{
-			ID:       0, // ID не хранится в полях, но он нам и не нужен для результата
 			URL:      safeStringFromField(hit.Fields["url"]),
 			Title:    safeStringFromField(hit.Fields["title"]),
 			Content:  safeStringFromField(hit.Fields["content"]),
@@ -183,7 +199,6 @@ func (e *SearchEngine) Search(queryStr string) []models.SearchResult {
 			doc.ContentHash = hash
 		}
 
-		// Дополнительная фильтрация дублей по заголовку (иногда контент чуть разный, а заголовок тот же)
 		cleanTitle := strings.ToLower(strings.TrimSpace(doc.Title))
 		if seenTitles[cleanTitle] {
 			continue
@@ -194,8 +209,7 @@ func (e *SearchEngine) Search(queryStr string) []models.SearchResult {
 			break
 		}
 
-		// Генерируем красивый идеальный сниппет, используя данные о совпадениях от Bleve
-		snippet := GenerateSnippetWithLocations(doc.Content, queryStr, hit.Locations["content"])
+		snippet := GenerateSnippetWithLocations(doc.Content, cleanedQuery, hit.Locations["content"])
 
 		results = append(results, models.SearchResult{
 			Document:  doc,
@@ -206,6 +220,17 @@ func (e *SearchEngine) Search(queryStr string) []models.SearchResult {
 	}
 
 	return results
+}
+
+func filterStopWords(query string) string {
+	words := strings.Fields(query)
+	filtered := make([]string, 0, len(words))
+	for _, w := range words {
+		if !stopWords[strings.ToLower(w)] {
+			filtered = append(filtered, w)
+		}
+	}
+	return strings.Join(filtered, " ")
 }
 
 func calculateRelevance(score, maxScore float64) string {

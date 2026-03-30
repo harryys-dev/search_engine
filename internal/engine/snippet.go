@@ -1,15 +1,48 @@
 package engine
 
 import (
-	"github.com/blevesearch/bleve/v2/search"
+	_ "embed"
+	"encoding/json"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
+
+	"github.com/blevesearch/bleve/v2/search"
 )
 
 type ByteRange struct {
 	Start int
 	End   int
+}
+
+//go:embed data/stopwords-ru.json
+var stopwordsRU []byte
+
+//go:embed data/stopwords-en.json
+var stopwordsEN []byte
+
+var stopWords map[string]bool
+
+func init() {
+	stopWords = make(map[string]bool)
+	loadStopwords(stopwordsRU)
+	loadStopwords(stopwordsEN)
+}
+
+func loadStopwords(data []byte) {
+	var words []string
+	if err := json.Unmarshal(data, &words); err != nil {
+		return
+	}
+	for _, w := range words {
+		stopWords[strings.ToLower(w)] = true
+	}
+}
+
+func isStopWord(text string, start, end int) bool {
+	word := strings.ToLower(strings.TrimSpace(text[start:end]))
+	return stopWords[word]
 }
 
 // GenerateSnippetWithLocations создает стильный сниппет, используя точные байтовые границы совпадений от Bleve
@@ -34,13 +67,62 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 		return truncateString(text, 250)
 	}
 
-	// Сортируем интервалы по началу (чтобы правильно расставлять теги и находить первый)
+	// Сортируем интервалы по началу
 	sort.Slice(ranges, func(i, j int) bool {
 		return ranges[i].Start < ranges[j].Start
 	})
 
-	firstMatch := ranges[0]
-	bestIdx := firstMatch.Start
+	// Пробуем найти совпадение ближе к началу текста,
+	// если первое от Bleve далеко
+	// Пробуем найти совпадение ближе к началу текста,
+	// если первое от Bleve далеко
+	// Сортируем интервалы по началу
+	sort.Slice(ranges, func(i, j int) bool {
+		return ranges[i].Start < ranges[j].Start
+	})
+
+	// ВСЕГДА ищем слова запроса в первых 500 байтах
+	queryLower := strings.ToLower(query)
+	queryWords := strings.Fields(queryLower)
+
+	filtered := make([]string, 0, len(queryWords))
+	for _, w := range queryWords {
+		if !stopWords[w] && len(w) > 1 {
+			filtered = append(filtered, w)
+		}
+	}
+
+	scanLimit := 500
+	if scanLimit > len(text) {
+		scanLimit = len(text)
+	}
+
+	for _, word := range filtered {
+		byteStart, byteEnd, found := findWordNormalized(text[:scanLimit], word)
+		if !found {
+			continue
+		}
+
+		duplicate := false
+		for _, existing := range ranges {
+			if existing.Start == byteStart && existing.End == byteEnd {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			ranges = append([]ByteRange{{Start: byteStart, End: byteEnd}}, ranges...)
+		}
+		break
+	}
+
+	// Сортируем ещё раз после вставок
+	sort.Slice(ranges, func(i, j int) bool {
+		return ranges[i].Start < ranges[j].Start
+	})
+
+	// Теперь ranges[0] — ближайшее к началу совпадение
+	bestIdx := ranges[0].Start
 
 	// Ищем начало предложения (назад до 150 байт)
 	start := bestIdx
@@ -52,7 +134,6 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 
 	for start > limit {
 		if start > 0 {
-			// Проверяем, не нарезали ли мы посередине многобайтового символа
 			if !utf8.RuneStart(text[start-1]) {
 				start--
 				continue
@@ -65,12 +146,10 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 		start--
 	}
 
-	// Финальная проверка границы start на корректность UTF-8
 	for start < len(text) && !utf8.RuneStart(text[start]) {
 		start++
 	}
 
-	// Пропускаем пробелы в начале
 	for start < len(text) && (text[start] == ' ' || text[start] == '\t' || text[start] == '\n' || text[start] == '\r') {
 		start++
 	}
@@ -80,56 +159,43 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 	if end >= len(text) {
 		end = len(text)
 	} else {
-		// Стараемся отрезать по пробелу, чтобы не рубить слова
-		// Сначала убеждаемся, что end не указывает в середину символа
 		for end > start && !utf8.RuneStart(text[end]) {
 			end--
 		}
-
 		spaceIdx := strings.LastIndex(text[start:end], " ")
 		if spaceIdx > 120 {
 			end = start + spaceIdx
 		}
 	}
 
-	// Еще раз проверяем end на корректность UTF-8 (LastIndex мог вернуть середину, если пробел был однобайтовым, но мы отрезали по нему)
-	// На самом деле slice [start:end] с LastIndex пробела безопасен, если пробел - ASCII.
-	// Но для надежности:
 	for end < len(text) && !utf8.RuneStart(text[end]) {
 		end++
 	}
 
-	// Проверяем, начинается ли сниппет с начала предложения или очень близко
-	isStartOfLib := false
-	if start == 0 {
-		isStartOfLib = true
-	} else if start > 0 {
-		for i := start - 1; i >= 0; i-- {
-			if text[i] != ' ' && text[i] != '\t' && text[i] != '\n' && text[i] != '\r' {
-				if text[i] == '.' || text[i] == '!' || text[i] == '?' {
-					isStartOfLib = true
-				}
-				break
-			}
+	// Строим сниппет
+	var builder strings.Builder
+
+	hasContentBefore := false
+	for i := 0; i < start; i++ {
+		ch := text[i]
+		if ch != ' ' && ch != '\t' && ch != '\n' && ch != '\r' {
+			hasContentBefore = true
+			break
 		}
 	}
-
-	var builder strings.Builder
-	if !isStartOfLib && start > 0 {
+	if hasContentBefore {
 		builder.WriteString("...")
 	}
 
-	// Вставляем маркеры с учетом рассчитанного диапазона [start:end]
 	currentByte := start
 	for _, r := range ranges {
 		if r.End <= start {
-			continue // Совпадение до нашего сниппета (бывает если есть много слов)
+			continue
 		}
 		if r.Start >= end {
-			break // Вышли за пределы сниппета
+			break
 		}
 
-		// Защита от выхода за границы
 		mStart := r.Start
 		if mStart < start {
 			mStart = start
@@ -139,12 +205,14 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 			mEnd = end
 		}
 
-		// Добавляем текст до хайлайта
+		if isStopWord(text, mStart, mEnd) {
+			continue
+		}
+
 		if mStart > currentByte {
 			builder.WriteString(escapeHTML(text[currentByte:mStart]))
 		}
 
-		// Избегаем наложения (когда одно слово заходит на другое)
 		if mStart >= currentByte {
 			builder.WriteString("<mark>")
 			builder.WriteString(escapeHTML(text[mStart:mEnd]))
@@ -153,7 +221,6 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 		}
 	}
 
-	// Добавляем оставшийся кусок текста до границы
 	if currentByte < end {
 		builder.WriteString(escapeHTML(text[currentByte:end]))
 	}
@@ -163,6 +230,60 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 	}
 
 	return builder.String()
+}
+
+func stripCombining(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if !unicode.Is(unicode.Mn, r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// findWordNormalized ищет слово в тексте, игнорируя combining marks.
+// Возвращает байтовые позиции в ОРИГИНАЛЬНОМ тексте.
+func findWordNormalized(text, word string) (int, int, bool) {
+	cleanText := stripCombining(strings.ToLower(text))
+	cleanWord := stripCombining(strings.ToLower(word))
+
+	idx := strings.Index(cleanText, cleanWord)
+	if idx < 0 {
+		return 0, 0, false
+	}
+
+	// Мапим позицию руны из cleaned обратно в байты оригинала
+	origRunes := []rune(text)
+	origIdx := 0
+	cleanIdx := 0
+	for origIdx < len(origRunes) && cleanIdx < idx {
+		if !unicode.Is(unicode.Mn, origRunes[origIdx]) {
+			cleanIdx++
+		}
+		origIdx++
+	}
+
+	// Байтовый старт
+	byteStart := 0
+	for i := 0; i < origIdx; i++ {
+		byteStart += utf8.RuneLen(origRunes[i])
+	}
+
+	// Байтовый конец — пропускаем wordLen non-combining рун
+	wordLen := utf8.RuneCountInString(cleanWord)
+	byteEnd := byteStart
+	endOrigIdx := origIdx
+	for wordLen > 0 && endOrigIdx < len(origRunes) {
+		byteEnd += utf8.RuneLen(origRunes[endOrigIdx])
+		if !unicode.Is(unicode.Mn, origRunes[endOrigIdx]) {
+			wordLen--
+		}
+		endOrigIdx++
+	}
+
+	return byteStart, byteEnd, true
 }
 
 func truncateString(str string, length int) string {
