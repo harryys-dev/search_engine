@@ -1,0 +1,13 @@
+bin/
+dist/
+node_modules/
+uploads/
+*.log
+*.exe
+.idea/
+.vscode/
+.DS_Store
+web/dist/
+*.sh
+.env.example
+search.bleve
