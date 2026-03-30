@@ -10,4 +10,4 @@ uploads/
 web/dist/
 *.sh
 .env.example
-search.bleve
+/search.bleve/
