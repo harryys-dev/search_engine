@@ -187,6 +187,7 @@ func stripBoilerplate(text string) string {
 	prefixes := []string{
 		"Материал из Википедии",
 		"Материал из Вики",
+		"Медиафайлы на Викискладе",
 		"From Wikipedia",
 		"Jump to navigation",
 		"Перейти к навигации",
@@ -223,7 +224,6 @@ func (c *Crawler) OnPage(fn func(Page)) {
 }
 
 func (c *Crawler) Crawl(seedURLs []string) []Page {
-
 	sitemapURLs := make([]string, 0, len(seedURLs))
 	for _, u := range seedURLs {
 		parsed, _ := url.Parse(u)

@@ -11,20 +11,29 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"search_engine/internal/crawler"
-	"search_engine/internal/engine"
-	"search_engine/internal/models"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"search_engine/internal/crawler"
+	"search_engine/internal/engine"
+	"search_engine/internal/models"
+
 	"github.com/PuerkitoBio/goquery"
 )
 
-type CrawlRequest struct {
-	URL      string `json:"url"`
-	MaxPages int    `json:"maxPages"`
+// CrawlerConfig — конфигурация краулера из crawler.json
+type CrawlerConfig struct {
+	SeedURLs     []string `json:"seed_urls"`
+	MaxPages     int      `json:"max_pages"`
+	MaxDepth     int      `json:"max_depth"`
+	DelayMs      int      `json:"delay_ms"`
+	Parallelism  int      `json:"parallelism"`
+	AllowedHosts []string `json:"allowed_hosts"`
+	UserAgent    string   `json:"user_agent"`
+	AutoStart    bool     `json:"auto_start"`
 }
 
 var (
@@ -43,13 +52,21 @@ func main() {
 		log.Fatalf("Failed to create uploads directory: %v", err)
 	}
 
+	// Загружаем конфиг краулера
+	crawlerCfg := loadCrawlerConfig()
+
+	// Auto-start краулера если настроено
+	if crawlerCfg.AutoStart && len(crawlerCfg.SeedURLs) > 0 {
+		go autoStartCrawler(crawlerCfg)
+	}
+
 	http.HandleFunc("/search", handleSearch)
-	http.HandleFunc("/index", handleIndex)
+	http.HandleFunc("/stats", handleStats)
 	http.HandleFunc("/upload", handleUpload)
 	http.HandleFunc("/crawl", handleCrawl)
 	http.HandleFunc("/crawl/status", handleCrawlStatus)
 	http.Handle("/files/", http.StripPrefix("/files/", http.FileServer(http.Dir("./uploads"))))
-	http.Handle("/", http.StripPrefix("/", http.FileServer(http.Dir("./web"))))
+	http.Handle("/", customFileServer("./web"))
 
 	server := &http.Server{
 		Addr:         ":8080",
@@ -65,6 +82,96 @@ func main() {
 	}
 }
 
+func loadCrawlerConfig() CrawlerConfig {
+	data, err := os.ReadFile("crawler.json")
+	if err != nil {
+		log.Println("crawler.json not found, using defaults")
+		return CrawlerConfig{
+			SeedURLs:    []string{},
+			MaxPages:    100,
+			MaxDepth:    4,
+			DelayMs:     500,
+			Parallelism: 5,
+			UserAgent:   "GoSearchEngine/1.0",
+			AutoStart:   false,
+		}
+	}
+
+	var cfg CrawlerConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		log.Printf("Error parsing crawler.json: %v", err)
+		return CrawlerConfig{AutoStart: false}
+	}
+
+	// Дефолтные значения если не указаны
+	if cfg.MaxPages == 0 {
+		cfg.MaxPages = 100
+	}
+	if cfg.MaxDepth == 0 {
+		cfg.MaxDepth = 4
+	}
+	if cfg.DelayMs == 0 {
+		cfg.DelayMs = 500
+	}
+	if cfg.Parallelism == 0 {
+		cfg.Parallelism = 5
+	}
+	if cfg.UserAgent == "" {
+		cfg.UserAgent = "GoSearchEngine/1.0"
+	}
+
+	log.Printf("Loaded crawler config: %d seed URLs, max %d pages, depth %d, parallelism %d",
+		len(cfg.SeedURLs), cfg.MaxPages, cfg.MaxDepth, cfg.Parallelism)
+	return cfg
+}
+
+func autoStartCrawler(cfg CrawlerConfig) {
+	// Даём серверу время на запуск
+	time.Sleep(1 * time.Second)
+
+	crawlerStatus.Lock()
+	crawlerStatus.Running = true
+	crawlerStatus.Message = "Автоматический краулинг запущен..."
+	crawlerStatus.Unlock()
+
+	defer func() {
+		crawlerStatus.Lock()
+		crawlerStatus.Running = false
+		crawlerStatus.Message = fmt.Sprintf("Краулинг завершён. Проиндексировано: %d страниц.", crawlerStatus.PagesFound)
+		crawlerStatus.Unlock()
+	}()
+
+	crawlerCfg := crawler.Config{
+		MaxPages:     cfg.MaxPages,
+		MaxDepth:     cfg.MaxDepth,
+		Delay:        time.Duration(cfg.DelayMs) * time.Millisecond,
+		UserAgent:    cfg.UserAgent,
+		AllowedHosts: cfg.AllowedHosts,
+	}
+
+	c := crawler.New(crawlerCfg, searchEngine)
+
+	c.OnPage(func(p crawler.Page) {
+		doc := models.Document{
+			ID:          int(atomic.AddInt64(&idCounter, 1)),
+			URL:         p.URL,
+			Title:       p.Title,
+			Content:     p.Content,
+			ContentHash: p.ContentHash,
+			FileType:    "web",
+		}
+		searchEngine.Index(doc)
+
+		crawlerStatus.Lock()
+		crawlerStatus.PagesFound++
+		crawlerStatus.Unlock()
+	})
+
+	log.Printf("Auto-crawl started from %d URLs", len(cfg.SeedURLs))
+	c.Crawl(cfg.SeedURLs)
+	log.Println("Auto-crawl finished.")
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -75,6 +182,45 @@ func corsMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+func handleSearch(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		http.Error(w, "Query parameter 'q' required", http.StatusBadRequest)
+		return
+	}
+
+	page := 1
+	if p := r.URL.Query().Get("page"); p != "" {
+		if val, err := strconv.Atoi(p); err == nil && val > 0 {
+			page = val
+		}
+	}
+
+	size := 10
+	if s := r.URL.Query().Get("size"); s != "" {
+		if val, err := strconv.Atoi(s); err == nil && val > 0 && val <= 50 {
+			size = val
+		}
+	}
+
+	response := searchEngine.SearchPaginated(query, page, size)
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Printf("Failed to encode response: %v", err)
+	}
+}
+
+func handleStats(w http.ResponseWriter, r *http.Request) {
+	crawlerStatus.RLock()
+	defer crawlerStatus.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(models.StatsResponse{
+		IndexedPages: searchEngine.DocCount(),
 	})
 }
 
@@ -172,7 +318,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := os.WriteFile(dstPath, fileBytes, 0644); err != nil {
+	if err := os.WriteFile(dstPath, fileBytes, 0o644); err != nil {
 		http.Error(w, "Failed to save file", http.StatusInternalServerError)
 		return
 	}
@@ -213,52 +359,13 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	searchEngine.Index(doc)
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(doc); err != nil {
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":  true,
+		"title":    doc.Title,
+		"fileType": doc.FileType,
+	}); err != nil {
 		log.Printf("Failed to encode response: %v", err)
 	}
-}
-
-func handleSearch(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query().Get("q")
-	if query == "" {
-		http.Error(w, "Query parameter 'q' required", http.StatusBadRequest)
-		return
-	}
-
-	results := searchEngine.Search(query)
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(results); err != nil {
-		log.Printf("Failed to encode response: %v", err)
-	}
-}
-
-func handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var doc models.Document
-	if err := json.NewDecoder(r.Body).Decode(&doc); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
-		return
-	}
-
-	if doc.ID == 0 {
-		doc.ID = int(atomic.AddInt64(&idCounter, 1))
-	}
-	doc.Content = cleanHTML(doc.Content)
-	searchEngine.Index(doc)
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(doc); err != nil {
-		log.Printf("Failed to encode response: %v", err)
-	}
-}
-
-var defaultSeedURLs = []string{
-	"https://ru.wikipedia.org/wiki/Поисковая_система",
-	"https://ru.wikipedia.org/wiki/Информатика",
 }
 
 func handleCrawl(w http.ResponseWriter, r *http.Request) {
@@ -275,43 +382,61 @@ func handleCrawl(w http.ResponseWriter, r *http.Request) {
 	}
 	crawlerStatus.RUnlock()
 
-	var req CrawlRequest
+	// Читаем конфиг заново для ручного запуска
+	cfg := loadCrawlerConfig()
+
+	var req struct {
+		URL      string `json:"url"`
+		MaxPages int    `json:"maxPages"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	if req.URL == "" {
-		http.Error(w, "URL is required", http.StatusBadRequest)
+	seedURLs := cfg.SeedURLs
+	if req.URL != "" {
+		seedURLs = append([]string{req.URL}, seedURLs...)
+	}
+
+	if len(seedURLs) == 0 {
+		http.Error(w, "No URLs to crawl", http.StatusBadRequest)
 		return
 	}
 
-	go runCrawler(req)
+	go runCrawlerWithConfig(seedURLs, req.MaxPages, cfg)
 
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Crawl started"})
 }
 
-func runCrawler(req CrawlRequest) {
+func runCrawlerWithConfig(seedURLs []string, reqMaxPages int, cfg CrawlerConfig) {
 	crawlerStatus.Lock()
 	crawlerStatus.Running = true
 	crawlerStatus.PagesFound = 0
-	crawlerStatus.Message = "Crawl started for " + req.URL
+	crawlerStatus.Message = "Краулинг запущен..."
 	crawlerStatus.Unlock()
 
 	defer func() {
 		crawlerStatus.Lock()
 		crawlerStatus.Running = false
-		crawlerStatus.Message = "Crawl finished. Found " + fmt.Sprintf("%d", crawlerStatus.PagesFound) + " new pages."
+		crawlerStatus.Message = fmt.Sprintf("Краулинг завершён. Проиндексировано: %d страниц.", crawlerStatus.PagesFound)
 		crawlerStatus.Unlock()
 	}()
 
-	cfg := crawler.DefaultConfig()
-	if req.MaxPages > 0 {
-		cfg.MaxPages = req.MaxPages
+	crawlerCfg := crawler.Config{
+		MaxPages:     cfg.MaxPages,
+		MaxDepth:     cfg.MaxDepth,
+		Delay:        time.Duration(cfg.DelayMs) * time.Millisecond,
+		UserAgent:    cfg.UserAgent,
+		AllowedHosts: cfg.AllowedHosts,
 	}
-	// Передаем searchEngine в краулер
-	c := crawler.New(cfg, searchEngine)
+
+	if reqMaxPages > 0 {
+		crawlerCfg.MaxPages = reqMaxPages
+	}
+
+	c := crawler.New(crawlerCfg, searchEngine)
 
 	c.OnPage(func(p crawler.Page) {
 		doc := models.Document{
@@ -329,8 +454,8 @@ func runCrawler(req CrawlRequest) {
 		crawlerStatus.Unlock()
 	})
 
-	log.Println("Starting crawl from:", req.URL)
-	c.Crawl([]string{req.URL})
+	log.Printf("Crawl started from %d URLs", len(seedURLs))
+	c.Crawl(seedURLs)
 	log.Println("Crawl finished.")
 }
 
@@ -346,25 +471,25 @@ func handleCrawlStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func extractHosts(urls []string) []string {
-	hosts := make(map[string]bool)
-	for _, u := range urls {
-		if strings.Contains(u, "://") {
-			parts := strings.Split(u, "/")
-			if len(parts) >= 3 {
-				host := parts[2]
-				hosts[host] = true
-				if strings.HasPrefix(host, "www.") {
-					hosts[host[4:]] = true
-				} else {
-					hosts["www."+host] = true
-				}
+func customFileServer(dir string) http.Handler {
+	fs := http.FileServer(http.Dir(dir))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join(dir, filepath.Clean(r.URL.Path))
+
+		// Проверяем, существует ли файл
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			// Для корня отдаём index.html, для остального — 404
+			if r.URL.Path == "/" {
+				r.URL.Path = "/index.html"
+				fs.ServeHTTP(w, r)
+				return
 			}
+			w.WriteHeader(http.StatusNotFound)
+			http.ServeFile(w, r, filepath.Join(dir, "404.html"))
+			return
 		}
-	}
-	result := make([]string, 0, len(hosts))
-	for h := range hosts {
-		result = append(result, h)
-	}
-	return result
+
+		fs.ServeHTTP(w, r)
+	})
 }

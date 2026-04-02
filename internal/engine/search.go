@@ -4,9 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"search_engine/internal/models"
 	"strings"
 	"sync"
+	"time"
+	uni "unicode"
+	"unicode/utf8"
+
+	"search_engine/internal/models"
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/custom"
@@ -37,18 +41,15 @@ func NewEngine() *SearchEngine {
 	var index bleve.Index
 	var err error
 
-	// Пытаемся открыть существующий индекс
 	index, err = bleve.Open(indexPath)
 	if errors.Is(err, bleve.ErrorIndexPathDoesNotExist) {
 		log.Println("Creating new index...")
-		// Если индекса нет, создаем новый
 		indexMapping := buildIndexMapping()
 		index, err = bleve.New(indexPath, indexMapping)
 		if err != nil {
 			log.Fatalf("Critical error creating new index: %v", err)
 		}
 	} else if err != nil {
-		// Другая ошибка при открытии
 		log.Fatalf("Critical error opening index: %v", err)
 	} else {
 		log.Println("Opened existing index.")
@@ -83,17 +84,15 @@ func buildIndexMapping() mapping.IndexMapping {
 	textFieldMapping := bleve.NewTextFieldMapping()
 	textFieldMapping.Analyzer = "ru"
 	textFieldMapping.Store = true
-	textFieldMapping.IncludeTermVectors = true // Нужно для подсветки
+	textFieldMapping.IncludeTermVectors = true
 
 	docMapping.AddFieldMappingsAt("title", textFieldMapping)
 	docMapping.AddFieldMappingsAt("content", textFieldMapping)
 
-	// URL должен быть индексируемым для точного поиска, но не для полнотекстового
 	keywordFieldMapping := bleve.NewKeywordFieldMapping()
 	keywordFieldMapping.Store = true
 	docMapping.AddFieldMappingsAt("url", keywordFieldMapping)
 
-	// Поля без индексации, просто для хранения
 	storeFieldMapping := bleve.NewTextFieldMapping()
 	storeFieldMapping.Store = true
 	storeFieldMapping.Index = false
@@ -110,8 +109,6 @@ func (e *SearchEngine) Index(doc models.Document) {
 	defer e.mu.Unlock()
 
 	var docID string
-	// Веб-страницы используем URL как ID для уникальности.
-	// Для файлов и текстов используем сгенерированный ID.
 	if doc.URL != "" {
 		docID = doc.URL
 	} else {
@@ -133,34 +130,58 @@ func (e *SearchEngine) Index(doc models.Document) {
 	}
 }
 
-// IsURLIndexed проверяет, был ли уже проиндексирован URL.
 func (e *SearchEngine) IsURLIndexed(url string) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	doc, err := e.index.Document(url)
-	// Если документ найден (doc != nil) и ошибки нет, значит URL уже в индексе
 	return doc != nil && err == nil
 }
 
-func (e *SearchEngine) Search(queryStr string) []models.SearchResult {
+// DocCount возвращает количество проиндексированных документов.
+func (e *SearchEngine) DocCount() uint64 {
+	count, err := e.index.DocCount()
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
+// SearchPaginated выполняет поиск с пагинацией и возвращает полную структуру ответа.
+func (e *SearchEngine) SearchPaginated(queryStr string, page, size int) models.SearchResponse {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	if queryStr == "" {
-		return []models.SearchResult{}
+	// Замеряем ТОЛЬКО Bleve поиск
+	bleveStart := time.Now()
+	fullStart := time.Now()
+
+	indexedPages := e.DocCount()
+
+	emptyResponse := func(suggestion string) models.SearchResponse {
+		return models.SearchResponse{
+			Results:      []models.SearchResult{},
+			Total:        0,
+			Page:         page,
+			PageSize:     size,
+			TotalPages:   0,
+			SearchTime:   time.Since(fullStart).Seconds(),
+			BleveTime:    time.Since(bleveStart).Seconds(), // чистое время Bleve
+			Suggestion:   suggestion,
+			IndexedPages: indexedPages,
+		}
 	}
 
-	// Убираем стоп-слова из запроса
+	if queryStr == "" {
+		return emptyResponse("")
+	}
+
 	cleanedQuery := filterStopWords(queryStr)
 	if cleanedQuery == "" {
-		cleanedQuery = queryStr // если всё оказались стоп-словами
+		cleanedQuery = queryStr
 	}
 
-	mq := bleve.NewMatchQuery(cleanedQuery)
-	mq.Analyzer = "ru"
-	mq.Fuzziness = 1
-
-	// Бустим content — чтобы документы где слово есть в тексте ранжировались выше
+	// Запрос только нужной страницы + 1 для проверки "есть следующая"
+	from := (page - 1) * size
 	contentQuery := bleve.NewMatchQuery(cleanedQuery)
 	contentQuery.Analyzer = "ru"
 	contentQuery.SetField("content")
@@ -170,21 +191,34 @@ func (e *SearchEngine) Search(queryStr string) []models.SearchResult {
 	titleQuery.SetField("title")
 
 	bq := bleve.NewBooleanQuery()
-	bq.AddShould(contentQuery) // основной вес — совпадение в контенте
-	bq.AddShould(titleQuery)   // доп. вес — совпадение в заголовке
+	bq.AddShould(contentQuery)
+	bq.AddShould(titleQuery)
 
 	searchRequest := bleve.NewSearchRequest(bq)
-	searchRequest.Size = 40
 	searchRequest.Fields = []string{"*"}
 	searchRequest.IncludeLocations = true
 
+	// Запрашиваем ТОЛЬКО текущую страницу, а не 1000
+	searchRequest.From = from
+	searchRequest.Size = size
+
 	searchResult, err := e.index.Search(searchRequest)
+	bleveTime := time.Since(bleveStart)
+
 	if err != nil {
 		log.Printf("Search error: %v", err)
-		return []models.SearchResult{}
+		return emptyResponse("")
 	}
 
-	results := make([]models.SearchResult, 0)
+	// total берём из searchResult.Total (Bleve считает сам)
+	totalResults := searchResult.Total
+	totalPages := int(totalResults) / size
+	if int(totalResults)%size > 0 {
+		totalPages++
+	}
+
+	// Сниппеты генерируем ТОЛЬКО для текущей страницы (до size штук)
+	results := make([]models.SearchResult, 0, len(searchResult.Hits))
 	seenTitles := make(map[string]bool)
 
 	for _, hit := range searchResult.Hits {
@@ -199,15 +233,12 @@ func (e *SearchEngine) Search(queryStr string) []models.SearchResult {
 			doc.ContentHash = hash
 		}
 
+		// Простая дедупликация — если дубликаты редки, это быстро
 		cleanTitle := strings.ToLower(strings.TrimSpace(doc.Title))
 		if seenTitles[cleanTitle] {
 			continue
 		}
 		seenTitles[cleanTitle] = true
-
-		if len(results) >= 20 {
-			break
-		}
 
 		snippet := GenerateSnippetWithLocations(doc.Content, cleanedQuery, hit.Locations["content"])
 
@@ -219,7 +250,162 @@ func (e *SearchEngine) Search(queryStr string) []models.SearchResult {
 		})
 	}
 
-	return results
+	// Spell check только если 0 результатов (это редкий путь)
+	suggestion := ""
+	if len(results) == 0 {
+		suggestion = e.suggest(queryStr)
+	}
+
+	return models.SearchResponse{
+		Results:      results,
+		Total:        totalResults,
+		Page:         page,
+		PageSize:     size,
+		TotalPages:   totalPages,
+		SearchTime:   time.Since(fullStart).Seconds(),
+		BleveTime:    bleveTime.Seconds(),
+		Suggestion:   suggestion,
+		IndexedPages: indexedPages,
+	}
+}
+
+// suggest находит исправленный вариант запроса при 0 результатах.
+// Использует fuzzy search + Levenshtein distance без внешних зависимостей.
+func (e *SearchEngine) suggest(query string) string {
+	words := strings.Fields(query)
+	meaningfulWords := make([]string, 0)
+
+	for _, w := range words {
+		lower := strings.ToLower(w)
+		if !stopWords[lower] && utf8.RuneCountInString(lower) > 2 {
+			meaningfulWords = append(meaningfulWords, lower)
+		}
+	}
+
+	if len(meaningfulWords) == 0 {
+		return ""
+	}
+
+	// Пробуем fuzzy search (Fuzziness: 2 — до 2 опечаток)
+	fuzzyQuery := bleve.NewMatchQuery(strings.Join(meaningfulWords, " "))
+	fuzzyQuery.Analyzer = "ru"
+	fuzzyQuery.SetFuzziness(2)
+
+	req := bleve.NewSearchRequest(fuzzyQuery)
+	req.Size = 3
+	req.Fields = []string{"title", "content"}
+
+	result, err := e.index.Search(req)
+	if err != nil || result.Total == 0 {
+		return ""
+	}
+
+	// Собираем слова из топ-результатов для сравнения
+	docWords := make(map[string]bool)
+	for _, hit := range result.Hits {
+		title := strings.ToLower(safeStringFromField(hit.Fields["title"]))
+		content := strings.ToLower(safeStringFromField(hit.Fields["content"]))
+		for _, w := range strings.Fields(title + " " + content) {
+			if utf8.RuneCountInString(w) > 2 && !stopWords[w] {
+				docWords[w] = true
+			}
+		}
+	}
+
+	// Для каждого слова запроса ищем ближайшее в документах
+	corrections := make(map[string]string)
+	for _, qw := range meaningfulWords {
+		if docWords[qw] {
+			continue
+		}
+
+		bestMatch := ""
+		bestDist := 999
+		for dw := range docWords {
+			dist := levenshteinRune(qw, dw)
+			if dist < bestDist && dist <= 3 {
+				bestDist = dist
+				bestMatch = dw
+			}
+		}
+
+		if bestMatch != "" {
+			corrections[qw] = bestMatch
+		}
+	}
+
+	if len(corrections) == 0 {
+		return ""
+	}
+
+	// Строим строку с исправлениями, сохраняя регистр
+	suggestion := make([]string, 0, len(words))
+	for _, w := range words {
+		lower := strings.ToLower(w)
+		if corr, ok := corrections[lower]; ok {
+			runes := []rune(corr)
+			if len(runes) > 0 {
+				firstOrig := []rune(w)[0]
+				if uni.IsUpper(firstOrig) {
+					runes[0] = uni.ToUpper(runes[0])
+				}
+			}
+			suggestion = append(suggestion, string(runes))
+		} else {
+			suggestion = append(suggestion, w)
+		}
+	}
+
+	return strings.Join(suggestion, " ")
+}
+
+// levenshteinRune вычисляет расстояние Левенштейна между двумя строками (Unicode-aware).
+func levenshteinRune(a, b string) int {
+	ra := []rune(a)
+	rb := []rune(b)
+	la := len(ra)
+	lb := len(rb)
+
+	if la == 0 {
+		return lb
+	}
+	if lb == 0 {
+		return la
+	}
+
+	d := make([][]int, la+1)
+	for i := range d {
+		d[i] = make([]int, lb+1)
+		d[i][0] = i
+	}
+	for j := 0; j <= lb; j++ {
+		d[0][j] = j
+	}
+
+	for i := 1; i <= la; i++ {
+		for j := 1; j <= lb; j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			d[i][j] = min3(d[i-1][j]+1, d[i][j-1]+1, d[i-1][j-1]+cost)
+		}
+	}
+
+	return d[la][lb]
+}
+
+func min3(a, b, c int) int {
+	if a < b {
+		if a < c {
+			return a
+		}
+		return c
+	}
+	if b < c {
+		return b
+	}
+	return c
 }
 
 func filterStopWords(query string) string {

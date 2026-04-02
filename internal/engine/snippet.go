@@ -72,16 +72,8 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 		return ranges[i].Start < ranges[j].Start
 	})
 
-	// Пробуем найти совпадение ближе к началу текста,
-	// если первое от Bleve далеко
-	// Пробуем найти совпадение ближе к началу текста,
-	// если первое от Bleve далеко
-	// Сортируем интервалы по началу
-	sort.Slice(ranges, func(i, j int) bool {
-		return ranges[i].Start < ranges[j].Start
-	})
-
-	// ВСЕГДА ищем слова запроса в первых 500 байтах
+	// ВСЕГДА ищем ВСЕ вхождения слов запроса в первых 500 байтах,
+	// чтобы выбрать лучшее (с заглавной буквы, после определения и т.д.)
 	queryLower := strings.ToLower(query)
 	queryWords := strings.Fields(queryLower)
 
@@ -97,23 +89,92 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 		scanLimit = len(text)
 	}
 
+	type candidate struct {
+		byteStart int
+		byteEnd   int
+		score     int
+	}
+
+	var best *candidate
+
 	for _, word := range filtered {
-		byteStart, byteEnd, found := findWordNormalized(text[:scanLimit], word)
-		if !found {
-			continue
+		// Ищем ВСЕ вхождения слова
+		allMatches := findAllWordNormalized(text[:scanLimit], word)
+
+		for _, m := range allMatches {
+			score := 0
+
+			// +100 если слово с заглавной буквы
+			firstRune, _ := utf8.DecodeRuneInString(text[m.byteStart:])
+			if unicode.IsUpper(firstRune) {
+				score += 100
+			}
+
+			// +50 если стоит в начале предложения (после . ! ? \n или в начале текста)
+			if m.byteStart > 0 {
+				preceding := strings.TrimRight(text[:m.byteStart], " \t\n\r")
+				if len(preceding) == 0 || preceding[len(preceding)-1] == '.' || preceding[len(preceding)-1] == '!' || preceding[len(preceding)-1] == '?' {
+					score += 50
+				}
+			} else {
+				score += 30
+			}
+
+			// +200 если после слова идёт ( или — — паттерн определения
+			remaining := strings.TrimSpace(text[m.byteEnd:])
+			if len(remaining) > 0 {
+				nextRune, _ := utf8.DecodeRuneInString(remaining)
+				if nextRune == '(' || nextRune == '—' || nextRune == '–' || nextRune == '-' {
+					score += 200
+				}
+			}
+
+			// -150 если после слова идёт мусорная строка (Викискладе и т.д.)
+			nextNewline := strings.Index(text[m.byteEnd:], "\n")
+			if nextNewline > 0 && nextNewline < 100 {
+				nextLine := strings.TrimSpace(text[m.byteEnd : m.byteEnd+nextNewline])
+				if isBoilerplateLine(nextLine) {
+					score -= 150
+				}
+			}
+
+			// -100 если ПЕРЕД словом идёт мусорная строка
+			prevNewline := -1
+			for i := m.byteStart - 1; i >= 0; i-- {
+				if text[i] == '\n' {
+					prevNewline = i
+					break
+				}
+			}
+			if prevNewline >= 0 {
+				prevLine := strings.TrimSpace(text[prevNewline:m.byteStart])
+				if isBoilerplateLine(prevLine) {
+					score -= 100
+				}
+			}
+
+			if best == nil || score > best.score {
+				best = &candidate{byteStart: m.byteStart, byteEnd: m.byteEnd, score: score}
+			}
 		}
 
+		// Если нашли идеальный кандидат (заглавная + определение) — не ищем дальше
+		if best != nil && best.score >= 300 {
+			break
+		}
+	}
+
+	if best != nil {
 		duplicate := false
 		for _, existing := range ranges {
-			if existing.Start == byteStart && existing.End == byteEnd {
+			if existing.Start == best.byteStart && existing.End == best.byteEnd {
 				duplicate = true
 				break
 			}
 		}
 		if !duplicate {
-			ranges = append([]ByteRange{{Start: byteStart, End: byteEnd}}, ranges...)
+			ranges = append([]ByteRange{{Start: best.byteStart, End: best.byteEnd}}, ranges...)
 		}
-		break
 	}
 
 	// Сортируем ещё раз после вставок
@@ -121,8 +182,17 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 		return ranges[i].Start < ranges[j].Start
 	})
 
-	// Теперь ranges[0] — ближайшее к началу совпадение
-	bestIdx := ranges[0].Start
+	// Теперь ranges[0] — лучшее совпадение
+	// ... цикл поиска best ...
+	// ... вставка best в ranges ...
+	// ... сортировка ranges ...
+
+	var bestIdx int
+	if best != nil {
+		bestIdx = best.byteStart
+	} else {
+		bestIdx = ranges[0].Start
+	}
 
 	// Ищем начало предложения (назад до 150 байт)
 	start := bestIdx
@@ -232,6 +302,24 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 	return builder.String()
 }
 
+func isBoilerplateLine(line string) bool {
+	lower := strings.ToLower(line)
+	boilerplate := []string{
+		"медиафайлы на викискладе",
+		"материал из википедии",
+		"перейти к навигации",
+		"перейти к поиску",
+		"см. также",
+		"навигация",
+	}
+	for _, b := range boilerplate {
+		if strings.Contains(lower, b) {
+			return true
+		}
+	}
+	return false
+}
+
 func stripCombining(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -243,47 +331,80 @@ func stripCombining(s string) string {
 	return b.String()
 }
 
-// findWordNormalized ищет слово в тексте, игнорируя combining marks.
+// findAllWordNormalized ищет ВСЕ вхождения слова в тексте, игнорируя combining marks.
 // Возвращает байтовые позиции в ОРИГИНАЛЬНОМ тексте.
-func findWordNormalized(text, word string) (int, int, bool) {
+func findAllWordNormalized(text, word string) []struct {
+	byteStart int
+	byteEnd   int
+} {
 	cleanText := stripCombining(strings.ToLower(text))
 	cleanWord := stripCombining(strings.ToLower(word))
 
-	idx := strings.Index(cleanText, cleanWord)
-	if idx < 0 {
-		return 0, 0, false
+	var results []struct {
+		byteStart int
+		byteEnd   int
 	}
 
-	// Мапим позицию руны из cleaned обратно в байты оригинала
 	origRunes := []rune(text)
+	cleanRunes := []rune(cleanText)
+
+	// Ищем все вхождения cleanWord в cleanText
+	searchRunes := []rune(cleanWord)
+	if len(searchRunes) == 0 {
+		return results
+	}
+
+	for i := 0; i <= len(cleanRunes)-len(searchRunes); i++ {
+		// Проверяем совпадение
+		match := true
+		for j := 0; j < len(searchRunes); j++ {
+			if cleanRunes[i+j] != searchRunes[j] {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+
+		// Мапим позицию cleanRunes[i] обратно в байты оригинала
+		byteStart := runeIndexToBytePos(origRunes, i)
+		byteEnd := runeIndexToBytePos(origRunes, i+len(searchRunes))
+
+		results = append(results, struct {
+			byteStart int
+			byteEnd   int
+		}{byteStart: byteStart, byteEnd: byteEnd})
+	}
+
+	return results
+}
+
+// runeIndexToBytePos конвертирует индекс руны (в cleaned тексте) в байтовую позицию оригинала.
+func runeIndexToBytePos(origRunes []rune, cleanIdx int) int {
 	origIdx := 0
-	cleanIdx := 0
-	for origIdx < len(origRunes) && cleanIdx < idx {
+	cleanI := 0
+	for origIdx < len(origRunes) && cleanI < cleanIdx {
 		if !unicode.Is(unicode.Mn, origRunes[origIdx]) {
-			cleanIdx++
+			cleanI++
 		}
 		origIdx++
 	}
 
-	// Байтовый старт
-	byteStart := 0
+	bytePos := 0
 	for i := 0; i < origIdx; i++ {
-		byteStart += utf8.RuneLen(origRunes[i])
+		bytePos += utf8.RuneLen(origRunes[i])
 	}
+	return bytePos
+}
 
-	// Байтовый конец — пропускаем wordLen non-combining рун
-	wordLen := utf8.RuneCountInString(cleanWord)
-	byteEnd := byteStart
-	endOrigIdx := origIdx
-	for wordLen > 0 && endOrigIdx < len(origRunes) {
-		byteEnd += utf8.RuneLen(origRunes[endOrigIdx])
-		if !unicode.Is(unicode.Mn, origRunes[endOrigIdx]) {
-			wordLen--
-		}
-		endOrigIdx++
+// findWordNormalized оставлен для совместимости, но теперь лучше использовать findAllWordNormalized
+func findWordNormalized(text, word string) (int, int, bool) {
+	all := findAllWordNormalized(text, word)
+	if len(all) == 0 {
+		return 0, 0, false
 	}
-
-	return byteStart, byteEnd, true
+	return all[0].byteStart, all[0].byteEnd, true
 }
 
 func truncateString(str string, length int) string {

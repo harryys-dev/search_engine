@@ -1,0 +1,12 @@
+{
+  "seed_urls": [
+    "https://ru.wikinews.org/wiki/%D0%97%D0%B0%D0%B3%D0%BB%D0%B0%D0%B2%D0%BD%D0%B0%D1%8F_%D1%81%D1%82%D1%80%D0%B0%D0%BD%D0%B8%D1%86%D0%B0"
+  ],
+  "max_pages": 1000,
+  "max_depth": 4,
+  "delay_ms": 500,
+  "parallelism": 5,
+  "allowed_hosts": [],
+  "user_agent": "GoSearchEngine/1.0",
+  "auto_start": false
+}
