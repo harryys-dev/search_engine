@@ -1,0 +1,21 @@
+linters:
+  enable:
+    - govet # базовая проверка Go
+    - errcheck # проверяет что ошибки обрабатываются
+    - staticcheck # глубокий статический анализ
+    - unused # находит неиспользуемый код
+    - gosimple # предлагает упрощения
+    - ineffassign # бесполезные присваивания
+    - typecheck # ошибки типов
+
+linters-settings:
+  govet:
+    enable-all: false
+
+run:
+  timeout: 2m
+  tests: true
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 10

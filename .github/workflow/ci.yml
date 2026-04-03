@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  # === ПРОВЕРКА БЭКЕНДА (GO) ===
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Клонируем код
+        uses: actions/checkout@v4
+
+      - name: Устанавливаем Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Качаем зависимости
+        run: go mod download
+
+      - name: Статический анализ (go vet)
+        run: go vet ./...
+
+      - name: Линтер (golangci-lint)
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: latest
+
+      - name: Запускаем тесты
+        run: go test ./...
+
+      - name: Проверяем сборку
+        run: go build ./...
+
+  # === ПРОВЕРКА ФРОНТЕНДА (TS) ===
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Клонируем код
+        uses: actions/checkout@v4
+
+      - name: Устанавливаем Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package.json
+
+      - name: Качаем зависимости
+        working-directory: frontend
+        run: npm install
+
+      - name: ESLint
+        working-directory: frontend
+        run: npx eslint src/
+
+      - name: TypeScript проверка
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+      - name: Сборка
+        working-directory: frontend
+        run: npm run build
