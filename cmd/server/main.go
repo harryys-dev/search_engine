@@ -66,7 +66,7 @@ func main() {
 	http.HandleFunc("/crawl", handleCrawl)
 	http.HandleFunc("/crawl/status", handleCrawlStatus)
 	http.Handle("/files/", http.StripPrefix("/files/", http.FileServer(http.Dir("./uploads"))))
-	http.Handle("/", customFileServer("./web"))
+	http.Handle("/", http.StripPrefix("/", http.FileServer(http.Dir("./web/dist"))))
 
 	server := &http.Server{
 		Addr:         ":8080",
