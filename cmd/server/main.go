@@ -24,7 +24,6 @@ import (
 	"github.com/PuerkitoBio/goquery"
 )
 
-// CrawlerConfig — конфигурация краулера из crawler.json
 type CrawlerConfig struct {
 	SeedURLs     []string `json:"seed_urls"`
 	MaxPages     int      `json:"max_pages"`
