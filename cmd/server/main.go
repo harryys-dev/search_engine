@@ -100,7 +100,6 @@ func loadCrawlerConfig() CrawlerConfig {
 		return CrawlerConfig{AutoStart: false}
 	}
 
-	// Дефолтные значения если не указаны
 	if cfg.MaxPages == 0 {
 		cfg.MaxPages = 100
 	}
