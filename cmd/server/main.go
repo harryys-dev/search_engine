@@ -52,10 +52,8 @@ func main() {
 		log.Fatalf("Failed to create uploads directory: %v", err)
 	}
 
-	// Загружаем конфиг краулера
 	crawlerCfg := loadCrawlerConfig()
 
-	// Auto-start краулера если настроено
 	if crawlerCfg.AutoStart && len(crawlerCfg.SeedURLs) > 0 {
 		go autoStartCrawler(crawlerCfg)
 	}
