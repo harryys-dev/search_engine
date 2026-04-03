@@ -169,14 +169,15 @@ function renderResults(results: SearchResult[]) {
       : escapeHtml(doc.title);
 
     const relevanceLabels: Record<string, { text: string; cls: string }> = {
-      high: { text: "Высокая", cls: "relevance-high" },
-      medium: { text: "Средняя", cls: "relevance-medium" },
-      low: { text: "Низкая", cls: "relevance-low" },
+      high: { text: "Высокая релевантность", cls: "relevance-high" },
+      medium: { text: "Средняя релевантность", cls: "relevance-medium" },
+      low: { text: "Низкая релевантность", cls: "relevance-low" },
     };
     const rel = relevanceLabels[doc.relevance] || relevanceLabels["low"];
 
     div.innerHTML = `
             <div class="result-meta">
+                <a href="${doc.url}" class="result-title-text">${doc.title}</a>
                 <span class="result-score ${rel.cls}">${rel.text}</span>
                 ${doc.fileType ? `<span class="file-type">${doc.fileType.toUpperCase()}</span>` : ""}
             </div>

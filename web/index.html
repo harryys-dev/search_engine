@@ -270,6 +270,32 @@
         font-variant-numeric: tabular-nums;
       }
 
+      .result-title-text {
+        text-decoration: none;
+        font-weight: bold;
+        color: #4285f4;
+      }
+
+      .result-title-text {
+        background: linear-gradient(
+          90deg,
+          #4285f4,
+          #b4d0ff,
+          #ffffff,
+          #b4d0ff,
+          #4285f4
+        );
+        background-size: 300% 100%;
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        transition: background-position 0.6s ease;
+      }
+
+      .result-title-text:hover {
+        background-position: 100% 0;
+      }
+
       /* ============ Подсказка ============ */
       .suggestion {
         background: var(--color-suggestion-bg);

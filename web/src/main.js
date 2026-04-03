@@ -124,7 +124,7 @@ function renderResults(results) {
     if (results.length === 0) {
         resultsDiv.innerHTML = `
             <div class="empty-state">
-                <div class="icon">🔍</div>
+                <img src="assets/gopher-cold-sweat.png" class="icon"></img>
                 <p>Ничего не найдено</p>
             </div>`;
         return;
@@ -139,15 +139,14 @@ function renderResults(results) {
             ? `<a href="${linkUrl}" target="_blank">${escapeHtml(doc.title)}</a>`
             : escapeHtml(doc.title);
         const relevanceLabels = {
-            high: { text: "Высокая", cls: "relevance-high" },
-            medium: { text: "Средняя", cls: "relevance-medium" },
-            low: { text: "Низкая", cls: "relevance-low" },
+            high: { text: "Высокая релевантность", cls: "relevance-high" },
+            medium: { text: "Средняя релевантность", cls: "relevance-medium" },
+            low: { text: "Низкая релевантность", cls: "relevance-low" },
         };
         const rel = relevanceLabels[doc.relevance] || relevanceLabels["low"];
         div.innerHTML = `
-            ${displayUrl ? `<div class="result-url"><a href="${linkUrl}" target="_blank">${escapeHtml(displayUrl)}</a></div>` : ""}
-            <div class="result-title">${titleHtml}</div>
             <div class="result-meta">
+                <a href="${doc.url}" class="result-title-text">${doc.title}</a>
                 <span class="result-score ${rel.cls}">${rel.text}</span>
                 ${doc.fileType ? `<span class="file-type">${doc.fileType.toUpperCase()}</span>` : ""}
             </div>
