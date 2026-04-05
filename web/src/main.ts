@@ -42,10 +42,8 @@ const uploadStatus = document.getElementById("uploadStatus") as HTMLDivElement;
 let currentPage = 1;
 let currentQuery = "";
 
-// Загружаем статистику при старте
 loadStats();
 
-// Tabs
 document.querySelectorAll(".tab-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
     const target = btn as HTMLElement;
@@ -63,7 +61,6 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
   });
 });
 
-// Поиск по Enter
 searchInput.addEventListener("keypress", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();
@@ -110,11 +107,9 @@ async function doSearch(page: number) {
 
     const data: SearchResponse = await res.json();
 
-    // Обновляем статистику из ответа
     indexedPagesSpan.textContent = `Проиндексировано страниц: ${data.indexedPages}`;
     searchTimeSpan.textContent = `${(data.searchTime * 1000).toFixed(0)} мс`;
 
-    // Подсказка
     if (data.suggestion) {
       suggestionDiv.style.display = "block";
       suggestionDiv.innerHTML = `Возможно вы имели в виду: <a id="suggestionLink">${escapeHtml(data.suggestion)}</a>`;
@@ -128,13 +123,10 @@ async function doSearch(page: number) {
       suggestionDiv.style.display = "none";
     }
 
-    // Результаты
     renderResults(data.results);
 
-    // Пагинация
     renderPagination(data.page, data.totalPages);
 
-    // Обновляем stats
     await loadStats();
   } catch (err) {
     console.error("Search error:", err);
@@ -192,14 +184,12 @@ function renderPagination(currentPage: number, totalPages: number) {
 
   if (totalPages <= 1) return;
 
-  // Кнопка "назад"
   const prevBtn = document.createElement("button");
   prevBtn.textContent = "←";
   prevBtn.disabled = currentPage <= 1;
   prevBtn.addEventListener("click", () => doSearch(currentPage - 1));
   paginationDiv.appendChild(prevBtn);
 
-  // Номера страниц
   const maxVisible = 7;
   let startPage = Math.max(1, currentPage - 3);
   let endPage = Math.min(totalPages, startPage + maxVisible - 1);
@@ -233,7 +223,6 @@ function renderPagination(currentPage: number, totalPages: number) {
     addPageButton(totalPages);
   }
 
-  // Кнопка "вперёд"
   const nextBtn = document.createElement("button");
   nextBtn.textContent = "→";
   nextBtn.disabled = currentPage >= totalPages;
@@ -251,7 +240,6 @@ function addPageButton(pageNum: number) {
   paginationDiv.appendChild(btn);
 }
 
-// File upload
 dropZone.addEventListener("click", () => fileInput.click());
 dropZone.addEventListener("dragover", (e) => {
   e.preventDefault();

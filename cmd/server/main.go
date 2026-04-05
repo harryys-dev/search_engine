@@ -100,7 +100,6 @@ func loadCrawlerConfig() CrawlerConfig {
 		return CrawlerConfig{AutoStart: false}
 	}
 
-	// Дефолтные значения если не указаны
 	if cfg.MaxPages == 0 {
 		cfg.MaxPages = 100
 	}
@@ -123,7 +122,6 @@ func loadCrawlerConfig() CrawlerConfig {
 }
 
 func autoStartCrawler(cfg CrawlerConfig) {
-	// Даём серверу время на запуск
 	time.Sleep(1 * time.Second)
 
 	crawlerStatus.Lock()
@@ -379,7 +377,6 @@ func handleCrawl(w http.ResponseWriter, r *http.Request) {
 	}
 	crawlerStatus.RUnlock()
 
-	// Читаем конфиг заново для ручного запуска
 	cfg := loadCrawlerConfig()
 
 	var req struct {
@@ -473,10 +470,8 @@ func customFileServer(dir string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := filepath.Join(dir, filepath.Clean(r.URL.Path))
 
-		// Проверяем, существует ли файл
 		info, err := os.Stat(path)
 		if err != nil || info.IsDir() {
-			// Для корня отдаём index.html, для остального — 404
 			if r.URL.Path == "/" {
 				r.URL.Path = "/index.html"
 				fs.ServeHTTP(w, r)

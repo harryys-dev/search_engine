@@ -137,7 +137,6 @@ func (e *SearchEngine) IsURLIndexed(url string) bool {
 	return doc != nil && err == nil
 }
 
-// DocCount возвращает количество проиндексированных документов.
 func (e *SearchEngine) DocCount() uint64 {
 	count, err := e.index.DocCount()
 	if err != nil {
@@ -146,12 +145,10 @@ func (e *SearchEngine) DocCount() uint64 {
 	return count
 }
 
-// SearchPaginated выполняет поиск с пагинацией и возвращает полную структуру ответа.
 func (e *SearchEngine) SearchPaginated(queryStr string, page, size int) models.SearchResponse {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	// Замеряем ТОЛЬКО Bleve поиск
 	bleveStart := time.Now()
 	fullStart := time.Now()
 
@@ -180,7 +177,6 @@ func (e *SearchEngine) SearchPaginated(queryStr string, page, size int) models.S
 		cleanedQuery = queryStr
 	}
 
-	// Запрос только нужной страницы + 1 для проверки "есть следующая"
 	from := (page - 1) * size
 	contentQuery := bleve.NewMatchQuery(cleanedQuery)
 	contentQuery.Analyzer = "ru"
@@ -198,7 +194,6 @@ func (e *SearchEngine) SearchPaginated(queryStr string, page, size int) models.S
 	searchRequest.Fields = []string{"*"}
 	searchRequest.IncludeLocations = true
 
-	// Запрашиваем ТОЛЬКО текущую страницу, а не 1000
 	searchRequest.From = from
 	searchRequest.Size = size
 
@@ -210,14 +205,12 @@ func (e *SearchEngine) SearchPaginated(queryStr string, page, size int) models.S
 		return emptyResponse("")
 	}
 
-	// total берём из searchResult.Total (Bleve считает сам)
 	totalResults := searchResult.Total
 	totalPages := int(totalResults) / size
 	if int(totalResults)%size > 0 {
 		totalPages++
 	}
 
-	// Сниппеты генерируем ТОЛЬКО для текущей страницы (до size штук)
 	results := make([]models.SearchResult, 0, len(searchResult.Hits))
 	seenTitles := make(map[string]bool)
 
@@ -233,7 +226,6 @@ func (e *SearchEngine) SearchPaginated(queryStr string, page, size int) models.S
 			doc.ContentHash = hash
 		}
 
-		// Простая дедупликация — если дубликаты редки, это быстро
 		cleanTitle := strings.ToLower(strings.TrimSpace(doc.Title))
 		if seenTitles[cleanTitle] {
 			continue
@@ -250,7 +242,6 @@ func (e *SearchEngine) SearchPaginated(queryStr string, page, size int) models.S
 		})
 	}
 
-	// Spell check только если 0 результатов (это редкий путь)
 	suggestion := ""
 	if len(results) == 0 {
 		suggestion = e.suggest(queryStr)
@@ -269,8 +260,6 @@ func (e *SearchEngine) SearchPaginated(queryStr string, page, size int) models.S
 	}
 }
 
-// suggest находит исправленный вариант запроса при 0 результатах.
-// Использует fuzzy search + Levenshtein distance без внешних зависимостей.
 func (e *SearchEngine) suggest(query string) string {
 	words := strings.Fields(query)
 	meaningfulWords := make([]string, 0)
@@ -286,7 +275,6 @@ func (e *SearchEngine) suggest(query string) string {
 		return ""
 	}
 
-	// Пробуем fuzzy search (Fuzziness: 2 — до 2 опечаток)
 	fuzzyQuery := bleve.NewMatchQuery(strings.Join(meaningfulWords, " "))
 	fuzzyQuery.Analyzer = "ru"
 	fuzzyQuery.SetFuzziness(2)
@@ -300,7 +288,6 @@ func (e *SearchEngine) suggest(query string) string {
 		return ""
 	}
 
-	// Собираем слова из топ-результатов для сравнения
 	docWords := make(map[string]bool)
 	for _, hit := range result.Hits {
 		title := strings.ToLower(safeStringFromField(hit.Fields["title"]))
@@ -312,7 +299,6 @@ func (e *SearchEngine) suggest(query string) string {
 		}
 	}
 
-	// Для каждого слова запроса ищем ближайшее в документах
 	corrections := make(map[string]string)
 	for _, qw := range meaningfulWords {
 		if docWords[qw] {
@@ -338,7 +324,6 @@ func (e *SearchEngine) suggest(query string) string {
 		return ""
 	}
 
-	// Строим строку с исправлениями, сохраняя регистр
 	suggestion := make([]string, 0, len(words))
 	for _, w := range words {
 		lower := strings.ToLower(w)
@@ -359,7 +344,6 @@ func (e *SearchEngine) suggest(query string) string {
 	return strings.Join(suggestion, " ")
 }
 
-// levenshteinRune вычисляет расстояние Левенштейна между двумя строками (Unicode-aware).
 func levenshteinRune(a, b string) int {
 	ra := []rune(a)
 	rb := []rune(b)

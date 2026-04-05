@@ -45,7 +45,6 @@ func isStopWord(text string, start, end int) bool {
 	return stopWords[word]
 }
 
-// GenerateSnippetWithLocations создает стильный сниппет, используя точные байтовые границы совпадений от Bleve
 func GenerateSnippetWithLocations(text string, query string, termLocs search.TermLocationMap) string {
 	if text == "" {
 		return ""
@@ -55,7 +54,6 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 		return truncateString(text, 250)
 	}
 
-	// Собираем все интервалы совпадений
 	var ranges []ByteRange
 	for _, locs := range termLocs {
 		for _, loc := range locs {
@@ -67,13 +65,10 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 		return truncateString(text, 250)
 	}
 
-	// Сортируем интервалы по началу
 	sort.Slice(ranges, func(i, j int) bool {
 		return ranges[i].Start < ranges[j].Start
 	})
 
-	// ВСЕГДА ищем ВСЕ вхождения слов запроса в первых 500 байтах,
-	// чтобы выбрать лучшее (с заглавной буквы, после определения и т.д.)
 	queryLower := strings.ToLower(query)
 	queryWords := strings.Fields(queryLower)
 
@@ -98,19 +93,16 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 	var best *candidate
 
 	for _, word := range filtered {
-		// Ищем ВСЕ вхождения слова
 		allMatches := findAllWordNormalized(text[:scanLimit], word)
 
 		for _, m := range allMatches {
 			score := 0
 
-			// +100 если слово с заглавной буквы
 			firstRune, _ := utf8.DecodeRuneInString(text[m.byteStart:])
 			if unicode.IsUpper(firstRune) {
 				score += 100
 			}
 
-			// +50 если стоит в начале предложения (после . ! ? \n или в начале текста)
 			if m.byteStart > 0 {
 				preceding := strings.TrimRight(text[:m.byteStart], " \t\n\r")
 				if len(preceding) == 0 || preceding[len(preceding)-1] == '.' || preceding[len(preceding)-1] == '!' || preceding[len(preceding)-1] == '?' {
@@ -120,7 +112,6 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 				score += 30
 			}
 
-			// +200 если после слова идёт ( или — — паттерн определения
 			remaining := strings.TrimSpace(text[m.byteEnd:])
 			if len(remaining) > 0 {
 				nextRune, _ := utf8.DecodeRuneInString(remaining)
@@ -129,7 +120,6 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 				}
 			}
 
-			// -150 если после слова идёт мусорная строка (Викискладе и т.д.)
 			nextNewline := strings.Index(text[m.byteEnd:], "\n")
 			if nextNewline > 0 && nextNewline < 100 {
 				nextLine := strings.TrimSpace(text[m.byteEnd : m.byteEnd+nextNewline])
@@ -138,7 +128,6 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 				}
 			}
 
-			// -100 если ПЕРЕД словом идёт мусорная строка
 			prevNewline := -1
 			for i := m.byteStart - 1; i >= 0; i-- {
 				if text[i] == '\n' {
@@ -158,7 +147,6 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 			}
 		}
 
-		// Если нашли идеальный кандидат (заглавная + определение) — не ищем дальше
 		if best != nil && best.score >= 300 {
 			break
 		}
@@ -177,15 +165,9 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 		}
 	}
 
-	// Сортируем ещё раз после вставок
 	sort.Slice(ranges, func(i, j int) bool {
 		return ranges[i].Start < ranges[j].Start
 	})
-
-	// Теперь ranges[0] — лучшее совпадение
-	// ... цикл поиска best ...
-	// ... вставка best в ranges ...
-	// ... сортировка ranges ...
 
 	var bestIdx int
 	if best != nil {
@@ -194,7 +176,6 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 		bestIdx = ranges[0].Start
 	}
 
-	// Ищем начало предложения (назад до 150 байт)
 	start := bestIdx
 	maxLookback := 150
 	limit := 0
@@ -224,7 +205,6 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 		start++
 	}
 
-	// Отмеряем 250 байт от начала сниппета для конца
 	end := start + 250
 	if end >= len(text) {
 		end = len(text)
@@ -242,7 +222,6 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 		end++
 	}
 
-	// Строим сниппет
 	var builder strings.Builder
 
 	hasContentBefore := false
@@ -331,8 +310,6 @@ func stripCombining(s string) string {
 	return b.String()
 }
 
-// findAllWordNormalized ищет ВСЕ вхождения слова в тексте, игнорируя combining marks.
-// Возвращает байтовые позиции в ОРИГИНАЛЬНОМ тексте.
 func findAllWordNormalized(text, word string) []struct {
 	byteStart int
 	byteEnd   int
@@ -348,14 +325,12 @@ func findAllWordNormalized(text, word string) []struct {
 	origRunes := []rune(text)
 	cleanRunes := []rune(cleanText)
 
-	// Ищем все вхождения cleanWord в cleanText
 	searchRunes := []rune(cleanWord)
 	if len(searchRunes) == 0 {
 		return results
 	}
 
 	for i := 0; i <= len(cleanRunes)-len(searchRunes); i++ {
-		// Проверяем совпадение
 		match := true
 		for j := 0; j < len(searchRunes); j++ {
 			if cleanRunes[i+j] != searchRunes[j] {
@@ -367,7 +342,6 @@ func findAllWordNormalized(text, word string) []struct {
 			continue
 		}
 
-		// Мапим позицию cleanRunes[i] обратно в байты оригинала
 		byteStart := runeIndexToBytePos(origRunes, i)
 		byteEnd := runeIndexToBytePos(origRunes, i+len(searchRunes))
 
@@ -380,7 +354,6 @@ func findAllWordNormalized(text, word string) []struct {
 	return results
 }
 
-// runeIndexToBytePos конвертирует индекс руны (в cleaned тексте) в байтовую позицию оригинала.
 func runeIndexToBytePos(origRunes []rune, cleanIdx int) int {
 	origIdx := 0
 	cleanI := 0
@@ -398,7 +371,6 @@ func runeIndexToBytePos(origRunes []rune, cleanIdx int) int {
 	return bytePos
 }
 
-// findWordNormalized оставлен для совместимости, но теперь лучше использовать findAllWordNormalized
 func findWordNormalized(text, word string) (int, int, bool) {
 	all := findAllWordNormalized(text, word)
 	if len(all) == 0 {

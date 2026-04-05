@@ -25,7 +25,6 @@ export default defineConfig({
         server.middlewares.use((req, res, next) => {
           const url = req.url?.split("?")[0] || "";
 
-          // API + корень — пропускаем
           if (
             url === "/" ||
             url === "" ||
@@ -38,12 +37,10 @@ export default defineConfig({
             return next();
           }
 
-          // Есть расширение (.js, .css, .png, .html) — Vite сам разберётся
           if (path.extname(url)) {
             return next();
           }
 
-          // Всё остальное без расширения (типа /tedst) — 404
           res.statusCode = 404;
           res.setHeader("Content-Type", "text/html");
           res.end(fs.readFileSync(path.join(process.cwd(), "404.html")));

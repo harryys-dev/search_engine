@@ -197,7 +197,6 @@ func stripBoilerplate(text string) string {
 	cleaned := text
 	for _, prefix := range prefixes {
 		if idx := strings.Index(cleaned, prefix); idx >= 0 && idx < 100 {
-			// Вырезаем до конца строки после префикса
 			end := strings.Index(cleaned[idx:], "\n")
 			if end == -1 {
 				end = strings.Index(cleaned[idx:], ". ")
@@ -210,7 +209,6 @@ func stripBoilerplate(text string) string {
 		}
 	}
 
-	// Убираем пустые строки в начале
 	for strings.HasPrefix(cleaned, "\n") {
 		cleaned = strings.TrimPrefix(cleaned, "\n")
 	}
@@ -294,10 +292,9 @@ func (c *Crawler) PageCount() int {
 }
 
 func isServicePage(u string) bool {
-	// Декодируем URL, чтобы корректно обрабатывать кириллицу и спецсимволы
 	decoded, err := url.QueryUnescape(u)
 	if err != nil {
-		decoded = u // Если ошибка, используем оригинал
+		decoded = u
 	}
 
 	servicePatterns := []string{

@@ -844,12 +844,10 @@
     </div>
 
     <script>
-      // Тёмная тема — переключатель + сохранение в localStorage
       (function () {
         const toggle = document.getElementById("themeToggle");
         const saved = localStorage.getItem("theme");
 
-        // Проверяем системные настройки если нет сохранённой темы
         function getPreferredTheme() {
           if (saved) return saved;
           return window.matchMedia("(prefers-color-scheme: dark)").matches
