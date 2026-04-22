@@ -12,3 +12,4 @@ web/dist/
 *.sh
 .env.example
 /search.bleve/
+.codex

@@ -51,6 +51,34 @@ func main() {
 		log.Fatalf("Failed to create uploads directory: %v", err)
 	}
 
+	// Ensure built assets contain fallback 404 and expected gopher image so custom 404 and empty-state icons work
+	distDir := "./web/dist"
+	// copy 404.html to dist if missing
+	if _, err := os.Stat(filepath.Join(distDir, "404.html")); os.IsNotExist(err) {
+		src404 := "./web/404.html"
+		if _, err := os.Stat(src404); err == nil {
+			if err := copyFile(src404, filepath.Join(distDir, "404.html")); err != nil {
+				log.Printf("Failed to copy 404.html to dist: %v", err)
+			}
+		}
+	}
+	// ensure a gopher image exists under dist/assets with a stable name
+	gopherTarget := filepath.Join(distDir, "assets", "gopher-cold-sweat.png")
+	if _, err := os.Stat(gopherTarget); os.IsNotExist(err) {
+		assetsDir := filepath.Join(distDir, "assets")
+		if entries, err := os.ReadDir(assetsDir); err == nil {
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), "gopher") && strings.HasSuffix(e.Name(), ".png") {
+					src := filepath.Join(assetsDir, e.Name())
+					if err := copyFile(src, gopherTarget); err != nil {
+						log.Printf("Failed to copy gopher image: %v", err)
+					}
+					break
+				}
+			}
+		}
+	}
+
 	crawlerCfg := loadCrawlerConfig()
 
 	if crawlerCfg.AutoStart && len(crawlerCfg.SeedURLs) > 0 {
@@ -63,7 +91,8 @@ func main() {
 	http.HandleFunc("/crawl", handleCrawl)
 	http.HandleFunc("/crawl/status", handleCrawlStatus)
 	http.Handle("/files/", http.StripPrefix("/files/", http.FileServer(http.Dir("./uploads"))))
-	http.Handle("/", http.StripPrefix("/", http.FileServer(http.Dir("./web/dist"))))
+	// Use customFileServer to serve index.html and a custom 404 when files are not found
+	http.Handle("/", customFileServer("./web/dist"))
 
 	server := &http.Server{
 		Addr:         ":8080",
@@ -465,20 +494,50 @@ func handleCrawlStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = out.Close()
+	}()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
+}
+
 func customFileServer(dir string) http.Handler {
 	fs := http.FileServer(http.Dir(dir))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.ServeFile(w, r, filepath.Join(dir, "index.html"))
+			return
+		}
+
 		path := filepath.Join(dir, filepath.Clean(r.URL.Path))
 
 		info, err := os.Stat(path)
 		if err != nil || info.IsDir() {
-			if r.URL.Path == "/" {
-				r.URL.Path = "/index.html"
-				fs.ServeHTTP(w, r)
-				return
+			// If dist doesn't contain a 404.html, try to serve fallback from source folder
+			four04 := filepath.Join(dir, "404.html")
+			if _, err := os.Stat(four04); os.IsNotExist(err) {
+				fallback := filepath.Join(filepath.Dir(dir), "404.html")
+				if _, err := os.Stat(fallback); err == nil {
+					http.ServeFile(w, r, fallback)
+					return
+				}
 			}
-			w.WriteHeader(http.StatusNotFound)
-			http.ServeFile(w, r, filepath.Join(dir, "404.html"))
+
+			http.ServeFile(w, r, four04)
 			return
 		}
 

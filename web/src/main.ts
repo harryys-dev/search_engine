@@ -143,7 +143,7 @@ function renderResults(results: SearchResult[]) {
   if (results.length === 0) {
     resultsDiv.innerHTML = `
             <div class="empty-state">
-                <img src="assets/gopher-cold-sweat.png" class="icon"></img>
+                <img src="/assets/gopher-cold-sweat.png" class="icon"></img>
                 <p>Ничего не найдено</p>
             </div>`;
     return;
