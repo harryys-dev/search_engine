@@ -4,10 +4,10 @@ type Document struct {
 	ID          int    `json:"id"`
 	URL         string `json:"url,omitempty"`
 	Title       string `json:"title"`
-	Content     string `json:"content"`
+	Content     string `json:"-"`
 	FilePath    string `json:"filePath,omitempty"`
 	FileType    string `json:"fileType,omitempty"`
-	ContentHash string `json:"contentHash,omitempty"`
+	ContentHash string `json:"-"`
 }
 
 type SearchResult struct {
