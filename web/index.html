@@ -843,31 +843,5 @@
       </div>
     </div>
 
-    <script>
-      (function () {
-        const toggle = document.getElementById("themeToggle");
-        const saved = localStorage.getItem("theme");
-
-        function getPreferredTheme() {
-          if (saved) return saved;
-          return window.matchMedia("(prefers-color-scheme: dark)").matches
-            ? "dark"
-            : "light";
-        }
-
-        function applyTheme(theme) {
-          document.documentElement.setAttribute("data-theme", theme);
-          toggle.textContent = theme === "dark" ? "☀️" : "🌙";
-          localStorage.setItem("theme", theme);
-        }
-
-        applyTheme(getPreferredTheme());
-
-        toggle.addEventListener("click", function () {
-          var current = document.documentElement.getAttribute("data-theme");
-          applyTheme(current === "dark" ? "light" : "dark");
-        });
-      })();
-    </script>
   </body>
 </html>

@@ -13,7 +13,6 @@ interface SearchResult {
   id: number;
   url?: string;
   title: string;
-  content: string;
   filePath?: string;
   fileType?: string;
   score: number;
@@ -21,7 +20,10 @@ interface SearchResult {
   relevance: string;
 }
 
-const API_URL = "http://localhost:8080";
+const API_URL =
+  window.location.port === "5173"
+    ? "http://127.0.0.1:8080"
+    : window.location.origin;
 
 const searchInput = document.getElementById("searchQuery") as HTMLInputElement;
 const searchBtn = document.getElementById("searchBtn") as HTMLButtonElement;
@@ -38,10 +40,12 @@ const searchLoading = document.getElementById(
 const dropZone = document.getElementById("dropZone") as HTMLDivElement;
 const fileInput = document.getElementById("fileInput") as HTMLInputElement;
 const uploadStatus = document.getElementById("uploadStatus") as HTMLDivElement;
+const themeToggle = document.getElementById("themeToggle") as HTMLButtonElement;
 
 let currentPage = 1;
 let currentQuery = "";
 
+initTheme();
 loadStats();
 
 document.querySelectorAll(".tab-btn").forEach((btn) => {
@@ -112,13 +116,17 @@ async function doSearch(page: number) {
 
     if (data.suggestion) {
       suggestionDiv.style.display = "block";
-      suggestionDiv.innerHTML = `Возможно вы имели в виду: <a id="suggestionLink">${escapeHtml(data.suggestion)}</a>`;
-      document
-        .getElementById("suggestionLink")
-        ?.addEventListener("click", () => {
-          searchInput.value = data.suggestion!;
-          doSearch(1);
-        });
+      suggestionDiv.textContent = "Возможно вы имели в виду: ";
+      const suggestionLink = document.createElement("a");
+      suggestionLink.id = "suggestionLink";
+      suggestionLink.href = "#";
+      suggestionLink.textContent = data.suggestion;
+      suggestionLink.addEventListener("click", (event) => {
+        event.preventDefault();
+        searchInput.value = data.suggestion!;
+        doSearch(1);
+      });
+      suggestionDiv.appendChild(suggestionLink);
     } else {
       suggestionDiv.style.display = "none";
     }
@@ -154,12 +162,6 @@ function renderResults(results: SearchResult[]) {
     const div = document.createElement("div");
     div.className = "result-item";
 
-    const linkUrl = doc.url || doc.filePath;
-    const displayUrl = doc.url || "";
-    const titleHtml = linkUrl
-      ? `<a href="${linkUrl}" target="_blank">${escapeHtml(doc.title)}</a>`
-      : escapeHtml(doc.title);
-
     const relevanceLabels: Record<string, { text: string; cls: string }> = {
       high: { text: "Высокая релевантность", cls: "relevance-high" },
       medium: { text: "Средняя релевантность", cls: "relevance-medium" },
@@ -167,14 +169,31 @@ function renderResults(results: SearchResult[]) {
     };
     const rel = relevanceLabels[doc.relevance] || relevanceLabels["low"];
 
-    div.innerHTML = `
-            <div class="result-meta">
-                <a href="${doc.url}" class="result-title-text">${doc.title}</a>
-                <span class="result-score ${rel.cls}">${rel.text}</span>
-                ${doc.fileType ? `<span class="file-type">${doc.fileType.toUpperCase()}</span>` : ""}
-            </div>
-            <div class="result-text">${doc.snippet || ""}</div>
-        `;
+    const meta = document.createElement("div");
+    meta.className = "result-meta";
+
+    const titleNode = buildResultTitle(doc);
+    titleNode.classList.add("result-title-text");
+    meta.appendChild(titleNode);
+
+    const score = document.createElement("span");
+    score.className = `result-score ${rel.cls}`;
+    score.textContent = rel.text;
+    meta.appendChild(score);
+
+    if (doc.fileType) {
+      const fileType = document.createElement("span");
+      fileType.className = "file-type";
+      fileType.textContent = doc.fileType.toUpperCase();
+      meta.appendChild(fileType);
+    }
+
+    const resultText = document.createElement("div");
+    resultText.className = "result-text";
+    renderSnippet(resultText, doc.snippet || "");
+
+    div.appendChild(meta);
+    div.appendChild(resultText);
     resultsDiv.appendChild(div);
   });
 }
@@ -297,8 +316,101 @@ async function handleFiles(files: FileList): Promise<void> {
   }, 5000);
 }
 
-function escapeHtml(text: string): string {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
+function buildResultTitle(doc: SearchResult): HTMLElement {
+  const href = normalizeResultHref(doc.url || doc.filePath);
+  if (!href) {
+    const span = document.createElement("span");
+    span.textContent = doc.title;
+    return span;
+  }
+
+  const link = document.createElement("a");
+  link.href = href;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = doc.title;
+  return link;
+}
+
+function normalizeResultHref(raw?: string): string | null {
+  if (!raw) return null;
+  if (raw.startsWith("/files/")) return raw;
+
+  try {
+    const url = new URL(raw);
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      return url.toString();
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function initTheme() {
+  const saved = localStorage.getItem("theme");
+  applyTheme(getPreferredTheme(saved));
+
+  themeToggle.addEventListener("click", () => {
+    const current = document.documentElement.getAttribute("data-theme");
+    applyTheme(current === "dark" ? "light" : "dark");
+  });
+}
+
+function getPreferredTheme(saved: string | null): "dark" | "light" {
+  if (saved === "dark" || saved === "light") {
+    return saved;
+  }
+
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
+}
+
+function applyTheme(theme: "dark" | "light") {
+  document.documentElement.setAttribute("data-theme", theme);
+  themeToggle.textContent = theme === "dark" ? "☀️" : "🌙";
+  localStorage.setItem("theme", theme);
+}
+
+function renderSnippet(container: HTMLElement, snippet: string) {
+  container.replaceChildren();
+
+  const parts = snippet.split(/(<mark>|<\/mark>)/g);
+  let inMark = false;
+
+  for (const part of parts) {
+    if (part === "<mark>") {
+      inMark = true;
+      continue;
+    }
+    if (part === "</mark>") {
+      inMark = false;
+      continue;
+    }
+    if (!part) {
+      continue;
+    }
+
+    const text = decodeHtmlEntities(part);
+    if (!text) {
+      continue;
+    }
+
+    if (inMark) {
+      const mark = document.createElement("mark");
+      mark.textContent = text;
+      container.appendChild(mark);
+      continue;
+    }
+
+    container.appendChild(document.createTextNode(text));
+  }
+}
+
+function decodeHtmlEntities(text: string): string {
+  const textarea = document.createElement("textarea");
+  textarea.innerHTML = text;
+  return textarea.value;
 }
