@@ -3,6 +3,7 @@ package crawler
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -80,9 +81,9 @@ func New(cfg Config, searchEngine *engine.SearchEngine) *Crawler {
 	})
 
 	c.collector.OnXML("//sitemap/loc|//urlset/url/loc", func(e *colly.XMLElement) {
-		url := e.Text
-		if isValidURL(url) && !isMediaURL(url) {
-			c.collector.Visit(url)
+		target := e.Text
+		if isValidURL(target) && !isMediaURL(target) {
+			c.safeVisit(target)
 		}
 	})
 
@@ -153,6 +154,10 @@ func New(cfg Config, searchEngine *engine.SearchEngine) *Crawler {
 		absURL := e.Request.AbsoluteURL(link)
 
 		if isValidURL(absURL) && !isMediaURL(absURL) {
+			if _, err := validateCrawlURL(absURL, c.allowedHosts); err != nil {
+				log.Printf("Skipping unsafe link %q: %v", absURL, err)
+				return
+			}
 			e.Request.Visit(absURL)
 		}
 	})
@@ -163,6 +168,11 @@ func New(cfg Config, searchEngine *engine.SearchEngine) *Crawler {
 			r.Abort()
 		}
 		c.mu.Unlock()
+
+		if _, err := validateCrawlURL(r.URL.String(), c.allowedHosts); err != nil {
+			log.Printf("Blocking unsafe request %q: %v", r.URL.String(), err)
+			r.Abort()
+		}
 	})
 
 	c.collector.OnError(func(r *colly.Response, err error) {
@@ -224,16 +234,38 @@ func (c *Crawler) OnPage(fn func(Page)) {
 func (c *Crawler) Crawl(seedURLs []string) []Page {
 	sitemapURLs := make([]string, 0, len(seedURLs))
 	for _, u := range seedURLs {
-		parsed, _ := url.Parse(u)
+		safeURL, err := NormalizeSeedURL(u, c.allowedHosts)
+		if err != nil {
+			log.Printf("Skipping unsafe seed URL %q: %v", u, err)
+			continue
+		}
+
+		parsed, _ := url.Parse(safeURL)
 		sitemapURLs = append(sitemapURLs, parsed.Scheme+"://"+parsed.Host+"/sitemap.xml")
 	}
 
+	httpClient := &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("too many redirects")
+			}
+			_, err := validateCrawlURL(req.URL.String(), c.allowedHosts)
+			return err
+		},
+	}
+
 	for _, su := range sitemapURLs {
-		resp, err := http.Get(su)
+		if _, err := validateCrawlURL(su, c.allowedHosts); err != nil {
+			log.Printf("Skipping unsafe sitemap URL %q: %v", su, err)
+			continue
+		}
+
+		resp, err := httpClient.Get(su)
 		if err == nil {
 			resp.Body.Close()
 			log.Printf("Found sitemap: %s", su)
-			c.collector.Visit(su) // XML callback заберёт все URL
+			c.safeVisit(su)
 		}
 	}
 
@@ -241,7 +273,7 @@ func (c *Crawler) Crawl(seedURLs []string) []Page {
 
 	go func() {
 		for _, u := range seedURLs {
-			c.collector.Visit(u)
+			c.safeVisit(u)
 		}
 		c.collector.Wait()
 		done <- true
@@ -273,10 +305,22 @@ func (c *Crawler) Crawl(seedURLs []string) []Page {
 func (c *Crawler) CrawlAsync(seedURLs []string) {
 	go func() {
 		for _, u := range seedURLs {
-			c.collector.Visit(u)
+			c.safeVisit(u)
 		}
 		c.collector.Wait()
 	}()
+}
+
+func (c *Crawler) safeVisit(rawURL string) {
+	safeURL, err := NormalizeSeedURL(rawURL, c.allowedHosts)
+	if err != nil {
+		log.Printf("Skipping unsafe crawl target %q: %v", rawURL, err)
+		return
+	}
+
+	if err := c.collector.Visit(safeURL); err != nil {
+		log.Printf("Visit skipped for %q: %v", safeURL, err)
+	}
 }
 
 func (c *Crawler) GetPages() []Page {
