@@ -6,5 +6,5 @@
   "parallelism": 5,
   "allowed_hosts": [],
   "user_agent": "GoSearchEngine/1.0",
-  "auto_start": true
+  "auto_start": false
 }
