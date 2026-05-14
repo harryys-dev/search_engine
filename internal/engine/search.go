@@ -25,6 +25,7 @@ type BleveDocument struct {
 	URL         string `json:"url"`
 	Title       string `json:"title"`
 	Content     string `json:"content"`
+	Excerpt     string `json:"excerpt"`
 	FilePath    string `json:"filePath"`
 	FileType    string `json:"fileType"`
 	ContentHash string `json:"contentHash"`
@@ -99,6 +100,7 @@ func buildIndexMapping() mapping.IndexMapping {
 	docMapping.AddFieldMappingsAt("filePath", storeFieldMapping)
 	docMapping.AddFieldMappingsAt("fileType", storeFieldMapping)
 	docMapping.AddFieldMappingsAt("contentHash", storeFieldMapping)
+	docMapping.AddFieldMappingsAt("excerpt", storeFieldMapping)
 
 	indexMapping.AddDocumentMapping("document", docMapping)
 	return indexMapping
@@ -120,6 +122,7 @@ func (e *SearchEngine) Index(doc models.Document) {
 		URL:         doc.URL,
 		Title:       doc.Title,
 		Content:     doc.Content,
+		Excerpt:     doc.Excerpt,
 		FilePath:    doc.FilePath,
 		FileType:    doc.FileType,
 		ContentHash: doc.ContentHash,
@@ -191,7 +194,7 @@ func (e *SearchEngine) SearchPaginated(queryStr string, page, size int) models.S
 	bq.AddShould(titleQuery)
 
 	searchRequest := bleve.NewSearchRequest(bq)
-	searchRequest.Fields = []string{"*"}
+	searchRequest.Fields = []string{"title", "content", "url", "filePath", "fileType", "contentHash", "excerpt"}
 	searchRequest.IncludeLocations = true
 
 	searchRequest.From = from
@@ -218,9 +221,9 @@ func (e *SearchEngine) SearchPaginated(queryStr string, page, size int) models.S
 		doc := models.Document{
 			URL:      safeStringFromField(hit.Fields["url"]),
 			Title:    safeStringFromField(hit.Fields["title"]),
-			Content:  safeStringFromField(hit.Fields["content"]),
 			FilePath: safeStringFromField(hit.Fields["filePath"]),
 			FileType: safeStringFromField(hit.Fields["fileType"]),
+			Excerpt:  safeStringFromField(hit.Fields["excerpt"]),
 		}
 		if hash, ok := hit.Fields["contentHash"].(string); ok {
 			doc.ContentHash = hash
@@ -232,7 +235,7 @@ func (e *SearchEngine) SearchPaginated(queryStr string, page, size int) models.S
 		}
 		seenTitles[cleanTitle] = true
 
-		snippet := GenerateSnippetWithLocations(doc.Content, cleanedQuery, hit.Locations["content"])
+		snippet := BuildSnippet(hit.Fields, cleanedQuery, hit.Locations)
 
 		results = append(results, models.SearchResult{
 			Document:  doc,
@@ -281,7 +284,7 @@ func (e *SearchEngine) suggest(query string) string {
 
 	req := bleve.NewSearchRequest(fuzzyQuery)
 	req.Size = 3
-	req.Fields = []string{"title", "content"}
+	req.Fields = []string{"title", "excerpt"}
 
 	result, err := e.index.Search(req)
 	if err != nil || result.Total == 0 {
@@ -291,7 +294,7 @@ func (e *SearchEngine) suggest(query string) string {
 	docWords := make(map[string]bool)
 	for _, hit := range result.Hits {
 		title := strings.ToLower(safeStringFromField(hit.Fields["title"]))
-		content := strings.ToLower(safeStringFromField(hit.Fields["content"]))
+		content := strings.ToLower(safeStringFromField(hit.Fields["excerpt"]))
 		for _, w := range strings.Fields(title + " " + content) {
 			if utf8.RuneCountInString(w) > 2 && !stopWords[w] {
 				docWords[w] = true
