@@ -5,6 +5,7 @@ type Document struct {
 	URL         string `json:"url,omitempty"`
 	Title       string `json:"title"`
 	Content     string `json:"-"`
+	Excerpt     string `json:"-"`
 	FilePath    string `json:"filePath,omitempty"`
 	FileType    string `json:"fileType,omitempty"`
 	ContentHash string `json:"-"`
