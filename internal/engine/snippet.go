@@ -281,6 +281,38 @@ func GenerateSnippetWithLocations(text string, query string, termLocs search.Ter
 	return builder.String()
 }
 
+func BuildSnippet(source map[string]interface{}, query string, locations search.FieldTermLocationMap) string {
+	title := safeStringFromField(source["title"])
+	content := safeStringFromField(source["content"])
+	if content != "" {
+		if locs, ok := locations["content"]; ok {
+			if snippet := GenerateSnippetWithLocations(content, query, locs); snippet != "" {
+				return snippet
+			}
+		}
+		if snippet := GenerateSnippetWithLocations(content, query, nil); snippet != "" {
+			return snippet
+		}
+	}
+
+	if title != "" {
+		if locs, ok := locations["title"]; ok {
+			if snippet := GenerateSnippetWithLocations(title, query, locs); snippet != "" {
+				return snippet
+			}
+		}
+		if snippet := GenerateSnippetWithLocations(title, query, nil); snippet != "" {
+			return snippet
+		}
+	}
+
+	excerpt := safeStringFromField(source["excerpt"])
+	if excerpt != "" {
+		return GenerateSnippetWithLocations(excerpt, query, nil)
+	}
+	return truncateString(title, 250)
+}
+
 func isBoilerplateLine(line string) bool {
 	lower := strings.ToLower(line)
 	boilerplate := []string{
@@ -394,4 +426,30 @@ func escapeHTML(s string) string {
 	s = strings.ReplaceAll(s, "\"", "&quot;")
 	s = strings.ReplaceAll(s, "'", "&#39;")
 	return s
+}
+
+func StripBoilerplate(text string) string {
+	cleaned := text
+	prefixes := []string{
+		"Материал из Википедии",
+		"Материал из Вики",
+		"Медиафайлы на Викискладе",
+		"From Wikipedia",
+		"Jump to navigation",
+		"Перейти к навигации",
+		"Перейти к поиску",
+	}
+	for _, prefix := range prefixes {
+		if idx := strings.Index(cleaned, prefix); idx >= 0 && idx < 100 {
+			end := strings.Index(cleaned[idx:], "\n")
+			if end == -1 {
+				end = strings.Index(cleaned[idx:], ". ")
+				if end == -1 {
+					end = len(prefix)
+				}
+			}
+			cleaned = strings.TrimSpace(cleaned[idx+end:])
+		}
+	}
+	return strings.TrimSpace(cleaned)
 }
