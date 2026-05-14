@@ -185,15 +185,15 @@ func autoStartCrawler(cfg CrawlerConfig) {
 	c := crawler.New(crawlerCfg, searchEngine)
 
 	c.OnPage(func(p crawler.Page) {
-			doc := models.Document{
-				ID:          int(atomic.AddInt64(&idCounter, 1)),
-				URL:         p.URL,
-				Title:       p.Title,
-				Content:     p.Content,
-				Excerpt:     p.Excerpt,
-				ContentHash: p.ContentHash,
-				FileType:    "web",
-			}
+		doc := models.Document{
+			ID:          int(atomic.AddInt64(&idCounter, 1)),
+			URL:         p.URL,
+			Title:       p.Title,
+			Content:     p.Content,
+			Excerpt:     p.Excerpt,
+			ContentHash: p.ContentHash,
+			FileType:    "web",
+		}
 		searchEngine.Index(doc)
 
 		crawlerStatus.Lock()
