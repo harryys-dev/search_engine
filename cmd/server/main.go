@@ -59,6 +59,9 @@ func main() {
 
 	// Ensure built assets contain fallback 404 and expected gopher image so custom 404 and empty-state icons work
 	distDir := "./web/dist"
+	if _, err := os.Stat(filepath.Join(distDir, "index.html")); err != nil {
+		log.Printf("Warning: %s is missing. Run `make build` for production assets or `npm run dev` for frontend development.", distDir)
+	}
 	// copy 404.html to dist if missing
 	if _, err := os.Stat(filepath.Join(distDir, "404.html")); os.IsNotExist(err) {
 		src404 := "./web/404.html"
@@ -182,14 +185,15 @@ func autoStartCrawler(cfg CrawlerConfig) {
 	c := crawler.New(crawlerCfg, searchEngine)
 
 	c.OnPage(func(p crawler.Page) {
-		doc := models.Document{
-			ID:          int(atomic.AddInt64(&idCounter, 1)),
-			URL:         p.URL,
-			Title:       p.Title,
-			Content:     p.Content,
-			ContentHash: p.ContentHash,
-			FileType:    "web",
-		}
+			doc := models.Document{
+				ID:          int(atomic.AddInt64(&idCounter, 1)),
+				URL:         p.URL,
+				Title:       p.Title,
+				Content:     p.Content,
+				Excerpt:     p.Excerpt,
+				ContentHash: p.ContentHash,
+				FileType:    "web",
+			}
 		searchEngine.Index(doc)
 
 		crawlerStatus.Lock()
@@ -324,7 +328,8 @@ func cleanHTML(raw string) string {
 	multiSpaceRegex := regexp.MustCompile(`\s+`)
 	text = multiSpaceRegex.ReplaceAllString(text, " ")
 
-	return strings.TrimSpace(text)
+	text = engine.StripBoilerplate(strings.TrimSpace(text))
+	return text
 }
 
 func extractPDFText(filePath string) (string, error) {
@@ -406,6 +411,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var content string
+	var excerpt string
 	switch ext {
 	case ".pdf":
 		txt, err := extractPDFText(dstPath)
@@ -421,6 +427,9 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		content = string(fileBytes)
 	}
 
+	content = capContent(content, 20000)
+	excerpt = truncateRunes(content, 600)
+
 	fileType := strings.TrimPrefix(ext, ".")
 	if fileType == "htm" {
 		fileType = "html"
@@ -434,6 +443,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		ID:       newID,
 		Title:    titleWithoutExt,
 		Content:  content,
+		Excerpt:  excerpt,
 		FilePath: "/files/" + storedFilename,
 		FileType: fileType,
 	}
@@ -448,6 +458,22 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		log.Printf("Failed to encode response: %v", err)
 	}
+}
+
+func capContent(text string, maxRunes int) string {
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	return string(runes[:maxRunes])
+}
+
+func truncateRunes(text string, maxRunes int) string {
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	return string(runes[:maxRunes])
 }
 
 func handleCrawl(w http.ResponseWriter, r *http.Request) {
@@ -530,6 +556,7 @@ func runCrawlerWithConfig(seedURLs []string, reqMaxPages int, cfg CrawlerConfig)
 			URL:         p.URL,
 			Title:       p.Title,
 			Content:     p.Content,
+			Excerpt:     p.Excerpt,
 			ContentHash: p.ContentHash,
 			FileType:    "web",
 		}
