@@ -22,6 +22,7 @@ type Page struct {
 	URL         string
 	Title       string
 	Content     string
+	Excerpt     string
 	ContentHash string
 }
 
@@ -115,18 +116,22 @@ func New(cfg Config, searchEngine *engine.SearchEngine) *Crawler {
 		var textBuf strings.Builder
 		article.RenderText(&textBuf)
 		content := textBuf.String()
-		content = stripBoilerplate(content) // ← сюда
 		content = stripCombining(content)
+		content = engine.StripBoilerplate(content)
 		if len(content) < 200 {
 			return
 		}
+		content = capContent(content, 20000)
 
 		hash := calculateHash(content)
+
+		excerpt := truncateRunes(content, 600)
 
 		page := Page{
 			URL:         pageURL.String(),
 			Title:       article.Title(),
 			Content:     content,
+			Excerpt:     excerpt,
 			ContentHash: hash,
 		}
 
@@ -193,38 +198,20 @@ func stripCombining(s string) string {
 	return b.String()
 }
 
-func stripBoilerplate(text string) string {
-	prefixes := []string{
-		"Материал из Википедии",
-		"Материал из Вики",
-		"Медиафайлы на Викискладе",
-		"From Wikipedia",
-		"Jump to navigation",
-		"Перейти к навигации",
-		"Перейти к поиску",
+func capContent(text string, maxRunes int) string {
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
 	}
+	return string(runes[:maxRunes])
+}
 
-	cleaned := text
-	for _, prefix := range prefixes {
-		if idx := strings.Index(cleaned, prefix); idx >= 0 && idx < 100 {
-			end := strings.Index(cleaned[idx:], "\n")
-			if end == -1 {
-				end = strings.Index(cleaned[idx:], ". ")
-				if end == -1 {
-					end = len(prefix)
-				}
-			}
-			cleaned = cleaned[idx+end:]
-			cleaned = strings.TrimSpace(cleaned)
-		}
+func truncateRunes(text string, maxRunes int) string {
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
 	}
-
-	for strings.HasPrefix(cleaned, "\n") {
-		cleaned = strings.TrimPrefix(cleaned, "\n")
-	}
-	cleaned = strings.TrimSpace(cleaned)
-
-	return cleaned
+	return string(runes[:maxRunes])
 }
 
 func (c *Crawler) OnPage(fn func(Page)) {
